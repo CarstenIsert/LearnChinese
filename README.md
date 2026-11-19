@@ -19,7 +19,8 @@ This project is hosted in a **public GitHub repository**. To keep personal detai
 * **Free-Talk First Voice UI:**
   * Clean audio call screen right at the top with a real-time voice visualizer.
   * **Multiple Conversation Partners & Voices:** Switch between different personas and Gemini Live voices (`Kore`, `Charon`, `Puck`, `Aoede`, `Fenrir`) with a single click.
-  * **Random Topic Suggestions:** Automatically suggests a conversation topic (combining everyday topics and follow-up hooks from your previous chats) with a one-click shuffle button.
+  * **Current & Seasonal Topic Suggestions:** Automatically suggests fresh, timely conversation topics (combining current date/season, modern everyday topics, follow-up hooks from previous chats, and `gemini-3.8-flash` suggestions via `/api/topics/suggest`) with a one-click *"Aktuelles Thema"* button.
+  * **Progressive HSK 3 & HSK 4 Curriculum:** Starts with core everyday scenarios and gradually expands with HSK 3 and HSK 4 topics (`server/curriculum.ts`)—both automatically as you practice and on-demand via *"HSK 3 erweitern"* / *"HSK 4 erweitern"* (including AI-generated follow-up scenarios once curated stages are unlocked).
   * **Live Pop-up Flashcards (简体 + Pinyin + Deutsch):** Whenever a word is explained in German or introduced during a call, `gemini-3.8-live` triggers `save_vocab` in real time to pop up a flashcard on screen.
   * **Blurred / Peekable Live Transcript:** Blurred by default so you train your ear rather than reading along, with a one-click *"Anzeigen / Ausblenden"* toggle.
 * **4-Pillar Memory Layer (SQLite + `gemini-3.8-flash` Reflection):**

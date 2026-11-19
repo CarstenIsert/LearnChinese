@@ -1,9 +1,28 @@
-import React, { useMemo, useState } from 'react';
-import { CheckCircle2, Plus } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  CheckCircle2,
+  Eye,
+  GraduationCap,
+  List,
+  Mic,
+  Plus,
+  RotateCcw,
+  Shuffle,
+  Square,
+  Volume2,
+} from 'lucide-react';
 import { VocabularyWord } from '../types.ts';
+
+interface PronunciationResult {
+  passed: boolean;
+  heard_text: string;
+  tone_accuracy_de: string;
+  tip_de: string;
+}
 
 interface VocabularyViewProps {
   allVocabulary: VocabularyWord[];
+  dueVocabulary: VocabularyWord[];
   dueCount: number;
   onAddVocabulary: (hanzi: string, pinyin: string, german: string) => Promise<void>;
   onReviewVocabulary: (
@@ -12,16 +31,239 @@ interface VocabularyViewProps {
   ) => Promise<void>;
 }
 
+type VocabMode = 'trainer' | 'list';
+type DeckFilter = 'due' | 'all' | 'struggling';
+type CardDirection = 'zh-to-de' | 'de-to-zh';
+
+let activeAudio: HTMLAudioElement | null = null;
+
+async function speakMandarin(
+  text: string,
+  onStateChange?: (loading: boolean) => void
+) {
+  const cleanText = text.replace(/\(.*?\)|（.*?）/g, '').trim();
+  if (!cleanText) return;
+
+  if (activeAudio) {
+    activeAudio.pause();
+    activeAudio.currentTime = 0;
+    activeAudio = null;
+  }
+
+  try {
+    onStateChange?.(true);
+    const url = `/api/tts?text=${encodeURIComponent(cleanText)}`;
+    const audio = new Audio(url);
+    activeAudio = audio;
+    audio.onended = () => {
+      if (activeAudio === audio) activeAudio = null;
+      onStateChange?.(false);
+    };
+    audio.onerror = () => {
+      if (activeAudio === audio) activeAudio = null;
+      onStateChange?.(false);
+    };
+    await audio.play();
+  } catch {
+    onStateChange?.(false);
+  }
+}
+
 export function VocabularyView({
   allVocabulary,
+  dueVocabulary,
   dueCount,
   onAddVocabulary,
   onReviewVocabulary,
 }: VocabularyViewProps) {
+  const [mode, setMode] = useState<VocabMode>('trainer');
+  const [deckFilter, setDeckFilter] = useState<DeckFilter>(
+    dueVocabulary.length > 0 ? 'due' : 'all'
+  );
+  const [direction, setDirection] = useState<CardDirection>('zh-to-de');
+  const [showPinyin, setShowPinyin] = useState<boolean>(false);
+  const [voiceMode, setVoiceMode] = useState<boolean>(false);
+  const [cardIndex, setCardIndex] = useState<number>(0);
+  const [isRevealed, setIsRevealed] = useState<boolean>(false);
+  const [isAudioPlaying, setIsAudioPlaying] = useState<boolean>(false);
+  const [isRecording, setIsRecording] = useState<boolean>(false);
+  const [isCheckingPronunciation, setIsCheckingPronunciation] = useState<boolean>(false);
+  const [pronunciationResult, setPronunciationResult] = useState<PronunciationResult | null>(null);
+  const [pronunciationError, setPronunciationError] = useState<string>('');
+  const [sessionCompleted, setSessionCompleted] = useState<number>(0);
+  const [sessionKnown, setSessionKnown] = useState<number>(0);
+  const [shuffleSeed, setShuffleSeed] = useState<number>(0);
+
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const recordChunksRef = useRef<Blob[]>([]);
+  const autoStopTimerRef = useRef<number | null>(null);
+
+  const stopMediaTracks = () => {
+    if (autoStopTimerRef.current !== null) {
+      window.clearTimeout(autoStopTimerRef.current);
+      autoStopTimerRef.current = null;
+    }
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+      mediaStreamRef.current = null;
+    }
+    mediaRecorderRef.current = null;
+  };
+
+  useEffect(() => {
+    return () => {
+      stopMediaTracks();
+    };
+  }, []);
+
+  // List mode state
   const [vocabSearch, setVocabSearch] = useState<string>('');
   const [newVocabHanzi, setNewVocabHanzi] = useState<string>('');
   const [newVocabPinyin, setNewVocabPinyin] = useState<string>('');
   const [newVocabGerman, setNewVocabGerman] = useState<string>('');
+
+  const trainerDeck = useMemo(() => {
+    let base: VocabularyWord[];
+    if (deckFilter === 'due') {
+      base = dueVocabulary.length > 0 ? [...dueVocabulary] : [];
+    } else if (deckFilter === 'struggling') {
+      base = allVocabulary.filter((w) => w.streak === 0);
+    } else {
+      base = [...allVocabulary];
+    }
+
+    if (shuffleSeed > 0) {
+      base = [...base].sort(() => Math.random() - 0.5);
+    }
+    return base;
+  }, [allVocabulary, deckFilter, dueVocabulary, shuffleSeed]);
+
+  const currentCard = trainerDeck[cardIndex] || null;
+  const isDeckDone = trainerDeck.length > 0 && cardIndex >= trainerDeck.length;
+
+  const resetTrainer = (newFilter?: DeckFilter) => {
+    if (newFilter) setDeckFilter(newFilter);
+    stopMediaTracks();
+    setIsRecording(false);
+    setCardIndex(0);
+    setIsRevealed(false);
+    setPronunciationResult(null);
+    setPronunciationError('');
+    setSessionCompleted(0);
+    setSessionKnown(0);
+  };
+
+  const handleRateCard = async (outcome: 'used_actively' | 'recognized' | 'forgotten') => {
+    if (!currentCard) return;
+    stopMediaTracks();
+    setIsRecording(false);
+    await onReviewVocabulary(currentCard.simplified_hanzi, outcome);
+    setSessionCompleted((c) => c + 1);
+    if (outcome === 'used_actively' || outcome === 'recognized') {
+      setSessionKnown((k) => k + 1);
+    }
+    setIsRevealed(false);
+    setPronunciationResult(null);
+    setPronunciationError('');
+    setCardIndex((i) => i + 1);
+  };
+
+  const startVoiceCheck = async () => {
+    if (!currentCard || isRecording || isCheckingPronunciation) return;
+    setPronunciationError('');
+    setPronunciationResult(null);
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm')
+        ? 'audio/webm'
+        : MediaRecorder.isTypeSupported('audio/mp4')
+        ? 'audio/mp4'
+        : '';
+
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      recordChunksRef.current = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          recordChunksRef.current.push(e.data);
+        }
+      };
+
+      recorder.onstop = async () => {
+        const blobType = recorder.mimeType || mimeType || 'audio/webm';
+        const audioBlob = new Blob(recordChunksRef.current, { type: blobType });
+        stopMediaTracks();
+        setIsRecording(false);
+
+        if (audioBlob.size < 400) {
+          setPronunciationError('Aufnahme war zu kurz. Bitte sprich deutlich ins Mikrofon.');
+          return;
+        }
+
+        setIsCheckingPronunciation(true);
+        try {
+          const base64 = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              const res = String(reader.result || '');
+              const idx = res.indexOf(',');
+              resolve(idx >= 0 ? res.slice(idx + 1) : res);
+            };
+            reader.onerror = () => reject(new Error('Audio-Lesefehler'));
+            reader.readAsDataURL(audioBlob);
+          });
+
+          const resp = await fetch('/api/vocabulary/check-pronunciation', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              targetHanzi: currentCard.simplified_hanzi,
+              targetPinyin: currentCard.pinyin,
+              targetGerman: currentCard.german,
+              audioBase64: base64,
+              mimeType: blobType.split(';')[0],
+            }),
+          });
+
+          if (!resp.ok) {
+            const errJson = await resp.json().catch(() => ({}));
+            throw new Error(errJson.error || 'Aussprache-Prüfung fehlgeschlagen');
+          }
+
+          const result = (await resp.json()) as PronunciationResult;
+          setPronunciationResult(result);
+        } catch (err: any) {
+          setPronunciationError(err?.message || 'Fehler bei der Aussprache-Prüfung.');
+        } finally {
+          setIsCheckingPronunciation(false);
+        }
+      };
+
+      recorder.start();
+      setIsRecording(true);
+      autoStopTimerRef.current = window.setTimeout(() => {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+          mediaRecorderRef.current.stop();
+        }
+      }, 6000);
+    } catch (err: any) {
+      stopMediaTracks();
+      setIsRecording(false);
+      setPronunciationError(
+        `Mikrofonzugriff fehlgeschlagen: ${err?.message || 'Bitte Mikrofon erlauben.'}`
+      );
+    }
+  };
+
+  const stopVoiceCheck = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.stop();
+    }
+  };
 
   const filteredVocab = useMemo(() => {
     if (!vocabSearch.trim()) return allVocabulary;
@@ -49,111 +291,388 @@ export function VocabularyView({
 
   return (
     <section aria-label="Vokabeln">
-      <div className="two-col-grid" style={{ marginBlockEnd: '1.25rem' }}>
-        <div className="panel-card">
-          <h2>Neues Wort speichern</h2>
-          <form onSubmit={handleSubmit}>
-            <div className="input-row">
-              <input
-                type="text"
-                placeholder="Hanzi (简体)"
-                value={newVocabHanzi}
-                onChange={(e) => setNewVocabHanzi(e.target.value)}
-                required
-              />
-              <input
-                type="text"
-                placeholder="Pinyin"
-                value={newVocabPinyin}
-                onChange={(e) => setNewVocabPinyin(e.target.value)}
-                required
-              />
-            </div>
-            <div className="input-row" style={{ marginBlockEnd: 0 }}>
-              <input
-                type="text"
-                placeholder="Deutsche Bedeutung"
-                value={newVocabGerman}
-                onChange={(e) => setNewVocabGerman(e.target.value)}
-                required
-              />
-              <button type="submit" className="btn-primary">
-                <Plus size={16} aria-hidden="true" /> Speichern
-              </button>
-            </div>
-          </form>
-        </div>
-
-        <div className="panel-card">
-          <h2>Vokabeln durchsuchen</h2>
-          <p style={{ fontSize: '0.86rem', color: 'var(--text-muted)', marginBlockStart: 0 }}>
-            {dueCount} Wörter stehen aktuell zur Wiederholung im Gespräch an.
-          </p>
-          <search>
-            <input
-              type="search"
-              aria-label="Vokabeln durchsuchen"
-              placeholder="Suche nach Hanzi, Pinyin oder Deutsch..."
-              value={vocabSearch}
-              onChange={(e) => setVocabSearch(e.target.value)}
-              style={{ width: '100%' }}
-            />
-          </search>
+      <div className="vocab-mode-bar">
+        <div className="partner-pills" role="tablist" aria-label="Vokabel-Ansicht">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'trainer'}
+            className={`partner-pill ${mode === 'trainer' ? 'active' : ''}`}
+            onClick={() => setMode('trainer')}
+          >
+            <GraduationCap size={15} aria-hidden="true" />
+            Vokabeltrainer ({dueCount} fällig)
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'list'}
+            className={`partner-pill ${mode === 'list' ? 'active' : ''}`}
+            onClick={() => setMode('list')}
+          >
+            <List size={15} aria-hidden="true" />
+            Alle Vokabeln ({allVocabulary.length})
+          </button>
         </div>
       </div>
 
-      <div className="two-col-grid">
-        {filteredVocab.map((w) => (
-          <article key={w.id} className="panel-card">
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'baseline',
-                gap: '0.5rem',
-              }}
-            >
-              <div>
-                <span className="vocab-hanzi" lang="zh-Hans">
-                  {w.simplified_hanzi}
-                </span>
-                <span className="vocab-pinyin">{w.pinyin}</span>
-              </div>
-              <span className="badge badge-emerald">
-                Aktiv: {w.times_used_actively}x · Verstanden: {w.times_recognized}x
-              </span>
-            </div>
-
-            <div className="vocab-german" style={{ marginBlock: '0.3rem' }}>
-              {w.german}
-            </div>
-            {w.example_hanzi && (
-              <div className="vocab-example">
-                <div lang="zh-Hans">{w.example_hanzi}</div>
-                {w.example_pinyin && <div>{w.example_pinyin}</div>}
-                {w.example_de && <div>{w.example_de}</div>}
-              </div>
-            )}
-
-            <div style={{ display: 'flex', gap: '0.4rem', marginBlockStart: '0.7rem' }}>
+      {mode === 'trainer' ? (
+        <div className="panel-card trainer-shell">
+          <div className="trainer-controls">
+            <div className="partner-pills" role="group" aria-label="Karten-Auswahl">
               <button
                 type="button"
-                style={{ fontSize: '0.78rem', padding: '0.3rem 0.6rem' }}
-                onClick={() => onReviewVocabulary(w.simplified_hanzi, 'used_actively')}
+                className={`partner-pill ${deckFilter === 'due' ? 'active' : ''}`}
+                onClick={() => resetTrainer('due')}
               >
-                <CheckCircle2 size={14} aria-hidden="true" /> Sitzt sicher
+                Fällig ({dueVocabulary.length})
               </button>
               <button
                 type="button"
-                style={{ fontSize: '0.78rem', padding: '0.3rem 0.6rem' }}
-                onClick={() => onReviewVocabulary(w.simplified_hanzi, 'forgotten')}
+                className={`partner-pill ${deckFilter === 'struggling' ? 'active' : ''}`}
+                onClick={() => resetTrainer('struggling')}
               >
-                Wiederholen
+                Neu / Schwierig ({allVocabulary.filter((w) => w.streak === 0).length})
+              </button>
+              <button
+                type="button"
+                className={`partner-pill ${deckFilter === 'all' ? 'active' : ''}`}
+                onClick={() => resetTrainer('all')}
+              >
+                Alle ({allVocabulary.length})
               </button>
             </div>
-          </article>
-        ))}
-      </div>
+
+            <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="partner-pill"
+                onClick={() => {
+                  setDirection((d) => (d === 'zh-to-de' ? 'de-to-zh' : 'zh-to-de'));
+                  setIsRevealed(false);
+                }}
+              >
+                {direction === 'zh-to-de' ? 'Chinesisch → Deutsch' : 'Deutsch → Chinesisch'}
+              </button>
+              <button
+                type="button"
+                className={`partner-pill ${showPinyin ? 'active' : ''}`}
+                onClick={() => setShowPinyin((p) => !p)}
+              >
+                Pinyin: {showPinyin ? 'An' : 'Aus'}
+              </button>
+              <button
+                type="button"
+                className={`partner-pill ${voiceMode ? 'active' : ''}`}
+                onClick={() => {
+                  setVoiceMode((v) => !v);
+                  setPronunciationResult(null);
+                  setPronunciationError('');
+                }}
+              >
+                <Mic size={14} aria-hidden="true" />
+                Sprach-Modus: {voiceMode ? 'An' : 'Aus'}
+              </button>
+              <button
+                type="button"
+                className="partner-pill"
+                onClick={() => {
+                  setShuffleSeed((s) => s + 1);
+                  resetTrainer();
+                }}
+              >
+                <Shuffle size={14} aria-hidden="true" /> Mischen
+              </button>
+            </div>
+          </div>
+
+          {trainerDeck.length === 0 ? (
+            <div className="trainer-empty">
+              <p>Keine Karten in dieser Auswahl vorhanden.</p>
+              <button type="button" className="btn-primary" onClick={() => resetTrainer('all')}>
+                Alle Vokabeln üben
+              </button>
+            </div>
+          ) : isDeckDone ? (
+            <div className="trainer-empty">
+              <h3 style={{ margin: 0 }}>Runde abgeschlossen!</h3>
+              <p style={{ color: 'var(--text-muted)' }}>
+                Du hast {sessionCompleted} Karten geübt ({sessionKnown} sicher erkannt/gewusst).
+              </p>
+              <div style={{ display: 'flex', gap: '0.6rem', justifyContent: 'center' }}>
+                <button type="button" className="btn-primary" onClick={() => resetTrainer()}>
+                  <RotateCcw size={15} aria-hidden="true" /> Nochmal üben
+                </button>
+                <button type="button" onClick={() => resetTrainer('all')}>
+                  Alle Vokabeln durchsehen
+                </button>
+              </div>
+            </div>
+          ) : (
+            currentCard && (
+              <div className="trainer-card">
+                <div className="trainer-progress">
+                  <span className="badge badge-gold">
+                    Karte {cardIndex + 1} von {trainerDeck.length}
+                  </span>
+                  {voiceMode && <span className="badge badge-emerald">Sprach-Modus aktiv</span>}
+                </div>
+
+                <div className="trainer-front">
+                  {direction === 'zh-to-de' ? (
+                    <>
+                      <div className="trainer-hanzi" lang="zh-Hans">
+                        {currentCard.simplified_hanzi}
+                      </div>
+                      {showPinyin && <div className="trainer-pinyin">{currentCard.pinyin}</div>}
+                    </>
+                  ) : (
+                    <>
+                      <div className="trainer-german-prompt">{currentCard.german}</div>
+                      {showPinyin && <div className="trainer-pinyin">{currentCard.pinyin}</div>}
+                    </>
+                  )}
+                </div>
+
+                <div className="trainer-primary-actions">
+                  <button
+                    type="button"
+                    className="btn-primary btn-listen-hero"
+                    onClick={() => speakMandarin(currentCard.simplified_hanzi, setIsAudioPlaying)}
+                    title="Mit Gemini-Stimme vorlesen"
+                  >
+                    <Volume2 size={22} aria-hidden="true" />
+                    {isAudioPlaying ? 'Spielt ab...' : 'Anhören'}
+                  </button>
+
+                  {voiceMode && (
+                    <button
+                      type="button"
+                      className={`btn-listen-hero ${isRecording ? 'btn-danger' : 'btn-secondary'}`}
+                      onClick={isRecording ? stopVoiceCheck : startVoiceCheck}
+                      disabled={isCheckingPronunciation}
+                    >
+                      {isRecording ? (
+                        <>
+                          <Square size={20} aria-hidden="true" /> Stopp &amp; Prüfen
+                        </>
+                      ) : (
+                        <>
+                          <Mic size={22} aria-hidden="true" />
+                          {isCheckingPronunciation ? 'Prüfe Töne...' : 'Sprechen & Prüfen'}
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
+
+                {pronunciationError && (
+                  <div className="error-banner" role="alert" style={{ width: '100%', maxInlineSize: 520, margin: 0 }}>
+                    <span>{pronunciationError}</span>
+                  </div>
+                )}
+
+                {pronunciationResult && (
+                  <div className="pronunciation-result-card">
+                    <div className="pronunciation-result-header">
+                      <span
+                        className={`badge ${
+                          pronunciationResult.passed ? 'badge-emerald' : 'badge-amber'
+                        }`}
+                      >
+                        {pronunciationResult.passed ? 'Aussprache gut!' : 'Töne noch üben'}
+                      </span>
+                      <span style={{ fontSize: '0.84rem', color: 'var(--text-muted)' }}>
+                        Gehört: <strong lang="zh-Hans">{pronunciationResult.heard_text}</strong>
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '0.88rem' }}>
+                      <strong>Töne:</strong> {pronunciationResult.tone_accuracy_de}
+                    </div>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                      {pronunciationResult.tip_de}
+                    </div>
+                  </div>
+                )}
+
+                {!isRevealed ? (
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    style={{ padding: '0.55rem 1.25rem' }}
+                    onClick={() => setIsRevealed(true)}
+                  >
+                    <Eye size={16} aria-hidden="true" /> Antwort aufdecken
+                  </button>
+                ) : (
+                  <div className="trainer-back">
+                    {direction === 'de-to-zh' && (
+                      <div className="trainer-hanzi" lang="zh-Hans">
+                        {currentCard.simplified_hanzi}
+                      </div>
+                    )}
+                    <div className="trainer-pinyin">{currentCard.pinyin}</div>
+                    {direction === 'zh-to-de' && (
+                      <div className="trainer-german-answer">{currentCard.german}</div>
+                    )}
+                    {currentCard.taiwan_note && (
+                      <div className="trainer-note">Hinweis: {currentCard.taiwan_note}</div>
+                    )}
+                    {currentCard.example_hanzi && (
+                      <div className="vocab-example" style={{ marginBlockStart: '0.65rem' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem' }}>
+                          <span lang="zh-Hans">{currentCard.example_hanzi}</span>
+                          <button
+                            type="button"
+                            className="btn-back-home"
+                            style={{ padding: '0.15rem 0.45rem', fontSize: '0.75rem' }}
+                            onClick={() =>
+                              speakMandarin(currentCard.example_hanzi!, setIsAudioPlaying)
+                            }
+                            title="Beispielsatz vorlesen"
+                          >
+                            <Volume2 size={13} aria-hidden="true" />
+                          </button>
+                        </div>
+                        {currentCard.example_pinyin && <div>{currentCard.example_pinyin}</div>}
+                        {currentCard.example_de && <div>{currentCard.example_de}</div>}
+                      </div>
+                    )}
+
+                    <div className="trainer-rating-row">
+                      <button
+                        type="button"
+                        className="btn-danger"
+                        onClick={() => handleRateCard('forgotten')}
+                      >
+                        Vergessen (Nochmal)
+                      </button>
+                      <button type="button" onClick={() => handleRateCard('recognized')}>
+                        Erkannt
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        onClick={() => handleRateCard('used_actively')}
+                      >
+                        <CheckCircle2 size={15} aria-hidden="true" /> Sicher gewusst!
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          )}
+        </div>
+      ) : (
+        <>
+          <div className="two-col-grid" style={{ marginBlockEnd: '1.25rem' }}>
+            <div className="panel-card">
+              <h2>Neues Wort speichern</h2>
+              <form onSubmit={handleSubmit}>
+                <div className="input-row">
+                  <input
+                    type="text"
+                    placeholder="Hanzi (简体)"
+                    value={newVocabHanzi}
+                    onChange={(e) => setNewVocabHanzi(e.target.value)}
+                    required
+                  />
+                  <input
+                    type="text"
+                    placeholder="Pinyin"
+                    value={newVocabPinyin}
+                    onChange={(e) => setNewVocabPinyin(e.target.value)}
+                    required
+                  />
+                </div>
+                <div className="input-row" style={{ marginBlockEnd: 0 }}>
+                  <input
+                    type="text"
+                    placeholder="Deutsche Bedeutung"
+                    value={newVocabGerman}
+                    onChange={(e) => setNewVocabGerman(e.target.value)}
+                    required
+                  />
+                  <button type="submit" className="btn-primary">
+                    <Plus size={16} aria-hidden="true" /> Speichern
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            <div className="panel-card">
+              <h2>Vokabeln durchsuchen</h2>
+              <p style={{ fontSize: '0.86rem', color: 'var(--text-muted)', marginBlockStart: 0 }}>
+                {dueCount} Wörter stehen aktuell zur Wiederholung im Gespräch an.
+              </p>
+              <search>
+                <input
+                  type="search"
+                  aria-label="Vokabeln durchsuchen"
+                  placeholder="Suche nach Hanzi, Pinyin oder Deutsch..."
+                  value={vocabSearch}
+                  onChange={(e) => setVocabSearch(e.target.value)}
+                  style={{ width: '100%' }}
+                />
+              </search>
+            </div>
+          </div>
+
+          <div className="two-col-grid">
+            {filteredVocab.map((w) => (
+              <article key={w.id} className="panel-card">
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'baseline',
+                    gap: '0.5rem',
+                  }}
+                >
+                  <div>
+                    <span className="vocab-hanzi" lang="zh-Hans">
+                      {w.simplified_hanzi}
+                    </span>
+                    <span className="vocab-pinyin">{w.pinyin}</span>
+                  </div>
+                  <span className="badge badge-emerald">
+                    Aktiv: {w.times_used_actively}x · Verstanden: {w.times_recognized}x
+                  </span>
+                </div>
+
+                <div className="vocab-german" style={{ marginBlock: '0.3rem' }}>
+                  {w.german}
+                </div>
+                {w.example_hanzi && (
+                  <div className="vocab-example">
+                    <div lang="zh-Hans">{w.example_hanzi}</div>
+                    {w.example_pinyin && <div>{w.example_pinyin}</div>}
+                    {w.example_de && <div>{w.example_de}</div>}
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', gap: '0.4rem', marginBlockStart: '0.7rem' }}>
+                  <button
+                    type="button"
+                    style={{ fontSize: '0.78rem', padding: '0.3rem 0.6rem' }}
+                    onClick={() => onReviewVocabulary(w.simplified_hanzi, 'used_actively')}
+                  >
+                    <CheckCircle2 size={14} aria-hidden="true" /> Sitzt sicher
+                  </button>
+                  <button
+                    type="button"
+                    style={{ fontSize: '0.78rem', padding: '0.3rem 0.6rem' }}
+                    onClick={() => onReviewVocabulary(w.simplified_hanzi, 'forgotten')}
+                  >
+                    Wiederholen
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        </>
+      )}
     </section>
   );
 }

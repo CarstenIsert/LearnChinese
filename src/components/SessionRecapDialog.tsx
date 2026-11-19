@@ -1,5 +1,6 @@
 import React, { useEffect, useId } from 'react';
 import { SessionReflection } from '../types.ts';
+import { formatDurationDe } from './HomeView.tsx';
 
 interface SessionRecapDialogProps {
   dialogRef: React.RefObject<HTMLDialogElement | null>;
@@ -48,14 +49,53 @@ export function SessionRecapDialog({ dialogRef, recap }: SessionRecapDialogProps
       {...({ closedby: 'any' } as any)}
       aria-labelledby={titleId}
     >
-      <h2 id={titleId} style={{ marginBlockStart: 0 }}>
-        Gesprächs-Auswertung
-      </h2>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '0.75rem',
+          marginBlockEnd: '0.85rem',
+        }}
+      >
+        <h2 id={titleId} style={{ margin: 0 }}>
+          Gesprächs-Auswertung
+        </h2>
+        {recap?.duration_seconds !== undefined && recap.duration_seconds > 0 && (
+          <span className="badge badge-gold">Dauer: {formatDurationDe(recap.duration_seconds)}</span>
+        )}
+      </div>
       {recap && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.9rem' }}>
           <div className="panel-card">
             <p style={{ margin: 0 }}>{recap.summary_de}</p>
           </div>
+
+          {recap.tone_feedback && recap.tone_feedback.length > 0 && (
+            <div className="panel-card">
+              <h3 style={{ marginBlockEnd: '0.45rem' }}>Ton- &amp; Aussprache-Analyse (Audio)</h3>
+              {recap.tone_feedback.map((tf, i) => (
+                <div
+                  key={i}
+                  style={{
+                    paddingBlock: '0.45rem',
+                    borderBlockEnd:
+                      i < recap.tone_feedback!.length - 1 ? '1px solid var(--border)' : 'none',
+                  }}
+                >
+                  <div style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--amber)' }}>
+                    <span lang="zh-Hans">{tf.word_or_phrase}</span> ({tf.pinyin})
+                  </div>
+                  <div style={{ fontSize: '0.84rem', color: 'var(--text-muted)' }}>
+                    Gehört: {tf.what_was_heard}
+                  </div>
+                  <div style={{ fontSize: '0.86rem', marginBlockStart: '0.15rem' }}>
+                    {tf.correction_de}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
 
           {recap.new_facts && recap.new_facts.length > 0 && (
             <div className="panel-card">

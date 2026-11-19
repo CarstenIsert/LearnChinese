@@ -4,6 +4,23 @@ export interface LearnerProfile {
   level: string;
   native_language: string;
   summary: string;
+  sentence_complexity?: 'auto' | 'short' | 'medium' | 'natural';
+}
+
+export interface LearningStats {
+  totalSeconds: number;
+  todaySeconds: number;
+  weekSeconds: number;
+  totalSessions: number;
+  totalVocabulary: number;
+  newWordsToday: number;
+  newWordsLast7Days: number;
+  masteredWords: number;
+  dueWords: number;
+  streakDays: number;
+  progressionTier: 1 | 2 | 3;
+  progressionLabelDe: string;
+  sentenceComplexityPreference: 'auto' | 'short' | 'medium' | 'natural';
 }
 
 export interface Persona {
@@ -76,6 +93,7 @@ export interface CurriculumScenario {
   voice_name: string;
   target_grammar: string;
   suggested_vocab: string;
+  hsk_level?: string;
   mastery_score: number;
   times_practiced: number;
   last_practiced_at: string | null;
@@ -87,6 +105,7 @@ export interface RecentSession {
   scenario_id: string | null;
   started_at: string;
   ended_at: string;
+  duration_seconds?: number;
   summary_de: string | null;
   persona_name: string;
   persona_emoji: string;
@@ -96,8 +115,10 @@ export interface BootstrapData {
   hasApiKey: boolean;
   liveModel: string;
   profile: LearnerProfile;
+  stats: LearningStats;
   personas: Persona[];
   scenarios: CurriculumScenario[];
+  curriculumMeta?: { remainingCurated: number };
   memoryFacts: MemoryFact[];
   recentEpisodes: PersonaEpisode[];
   skills: LearnerSkill[];
@@ -115,6 +136,7 @@ export interface SessionReflection {
   summary_de: string;
   episode_summary_for_persona: string;
   next_hook_for_persona: string;
+  duration_seconds?: number;
   new_facts: Array<{
     id?: number;
     category: string;
@@ -125,6 +147,12 @@ export interface SessionReflection {
     better_taiwan_mandarin: string;
     pinyin: string;
     explanation_de: string;
+  }>;
+  tone_feedback?: Array<{
+    word_or_phrase: string;
+    pinyin: string;
+    what_was_heard: string;
+    correction_de: string;
   }>;
   skill_updates: Array<{
     skill_name: string;

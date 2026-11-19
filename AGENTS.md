@@ -12,11 +12,13 @@ All AI coding assistants and contributors MUST follow these rules strictly:
 
 ## Architecture Overview
 - **Frontend:** React 19 + TypeScript + Vite (`src/`, default port `8888`)
-  - Modular component architecture (`src/components/FreeTalkView.tsx`, `VocabularyView.tsx`, `ScenariosView.tsx`, `MemoryView.tsx`, `SessionRecapDialog.tsx`).
-  - Free-Talk-first Voice UI with random topic suggestions, live pop-up vocabulary cards (Simplified Hanzi + Pinyin + German), and a blurred/toggleable live transcript.
+  - Modular component & hook architecture (`src/components/HomeView.tsx`, `FreeTalkView.tsx`, `VocabularyView.tsx`, `ScenariosView.tsx`, `MemoryView.tsx`, `SessionRecapDialog.tsx`, `src/hooks/useTopicAndCurriculum.ts`).
+  - Free-Talk-first Voice UI with current/seasonal topic suggestions, live pop-up vocabulary cards (Simplified Hanzi + Pinyin + German), and a blurred/toggleable live transcript.
+  - Filterable HSK 3 & HSK 4 scenario curriculum with progressive automatic and on-demand expansion.
   - Uses native `<dialog>` elements (with `closedby="any"` and light-dismiss fallback) and semantic `lang` attributes (`de`, `zh-Hans`).
 - **Backend:** Node.js + Express + WebSocket proxy (`server/`, default port `6889`)
   - Keeps `GEMINI_API_KEY` strictly on the server (loaded from `.env`).
   - Proxies low-latency bidirectional PCM audio (16kHz input, 24kHz output) and live tool calls (`save_vocab`, `record_vocab_review`, `remember_fact`) to the Gemini Multimodal Live API (`gemini-3.8-live`) via `@google/genai`.
-  - Runs a Post-Session Reflection pipeline (`gemini-3.8-flash`) after each call to extract new semantic facts, episodic relationship hooks, grammar/skill observations, and SRS vocabulary review updates.
+  - Provides current/seasonal topic generation (`POST /api/topics/suggest`) and progressive HSK 3 & HSK 4 curriculum expansion (`POST /api/curriculum/expand`) via `server/curriculum.ts`.
+  - Runs a Post-Session Reflection pipeline (`gemini-3.8-flash`) after each call to extract new semantic facts, episodic relationship hooks, grammar/skill observations, SRS vocabulary review updates, and automatic curriculum progression.
 - **Database:** Local SQLite (`better-sqlite3`) stored at `data/tutor.db`.

@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { BookOpen, Brain, GraduationCap, PhoneCall, Sparkles } from 'lucide-react';
+import { BookOpen, Brain, GraduationCap, Home, PhoneCall, Sparkles } from 'lucide-react';
 import { LiveAudioManager } from './audio.ts';
 import { FreeTalkView } from './components/FreeTalkView.tsx';
+import { HomeView } from './components/HomeView.tsx';
 import { MemoryView } from './components/MemoryView.tsx';
 import { ScenariosView } from './components/ScenariosView.tsx';
 import { SessionRecapDialog } from './components/SessionRecapDialog.tsx';
 import { VocabularyView } from './components/VocabularyView.tsx';
+import { useTopicAndCurriculum } from './hooks/useTopicAndCurriculum.ts';
 import {
   BootstrapData,
   CurriculumScenario,
@@ -15,32 +17,18 @@ import {
   VocabularyWord,
 } from './types.ts';
 
-type ActiveTab = 'talk' | 'vocab' | 'curriculum' | 'memory';
-
-const RANDOM_TOPIC_POOL = [
-  'Erzähl von deinem heutigen Tag und frag nach dem Wetter.',
-  'Pläne für das kommende Wochenende und Lieblingsessen.',
-  'Reiseroute mit dem Zug oder Mietwagen planen.',
-  'Im Restaurant bestellen und über Lieblingsgerichte sprechen.',
-  'Über zukünftige Reisepläne und das Chinesischlernen plaudern.',
-  'Unterschiede im Alltag, Essen und Wetter vergleichen.',
-  'Auf dem Abendmarkt Getränke und Snacks bestellen.',
-  'Über frühere Reisen und schöne Ausflugsziele sprechen.',
-  'Einladung zum Tee und lockerer Smalltalk.',
-  'Hobbys, Sport und wie man nach der Arbeit entspannt.',
-];
+type ActiveTab = 'home' | 'talk' | 'vocab' | 'curriculum' | 'memory';
 
 export default function App() {
   const [data, setData] = useState<BootstrapData | null>(null);
-  const [activeTab, setActiveTab] = useState<ActiveTab>('talk');
+  const [activeTab, setActiveTab] = useState<ActiveTab>('home');
   const [selectedPersonaId, setSelectedPersonaId] = useState<string>('');
   const [selectedScenarioId, setSelectedScenarioId] = useState<string>('');
-  const [suggestedTopic, setSuggestedTopic] = useState<string>(() => {
-    return RANDOM_TOPIC_POOL[Math.floor(Math.random() * RANDOM_TOPIC_POOL.length)];
-  });
 
   // Call state
   const [callState, setCallState] = useState<'idle' | 'connecting' | 'in_call' | 'analyzing'>('idle');
+  const [callDurationSeconds, setCallDurationSeconds] = useState<number>(0);
+  const [enableToneAnalysis, setEnableToneAnalysis] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string>('');
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [isMuted, setIsMuted] = useState<boolean>(false);
@@ -93,6 +81,16 @@ export default function App() {
     fetchBootstrap();
   }, [fetchBootstrap]);
 
+  // Live call duration timer
+  useEffect(() => {
+    if (callState !== 'in_call') return;
+    setCallDurationSeconds(0);
+    const id = window.setInterval(() => {
+      setCallDurationSeconds((prev) => prev + 1);
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [callState]);
+
   // Clean up microphone, audio playback, WebSocket, and timers on unmount
   useEffect(() => {
     return () => {
@@ -106,26 +104,23 @@ export default function App() {
     };
   }, []);
 
-  const shuffleTopic = useCallback(() => {
-    setSelectedScenarioId('');
-    const pool = [...RANDOM_TOPIC_POOL];
-    if (data?.personas) {
-      for (const p of data.personas) {
-        if (p.initial_hook) pool.push(p.initial_hook);
-      }
-    }
-    if (data?.recentEpisodes) {
-      for (const ep of data.recentEpisodes) {
-        if (ep.next_hook) pool.push(ep.next_hook);
-      }
-    }
-    const candidates = pool.filter((t) => t !== suggestedTopic);
-    const next = candidates[Math.floor(Math.random() * candidates.length)] || RANDOM_TOPIC_POOL[0];
-    setSuggestedTopic(next);
-  }, [data, suggestedTopic]);
+  const {
+    suggestedTopic,
+    isShufflingTopic,
+    shuffleTopic,
+    cancelPendingTopicFetch,
+    expandCurriculum: handleExpandCurriculum,
+  } = useTopicAndCurriculum({
+    data,
+    selectedPersonaId,
+    setData,
+    setSelectedScenarioId,
+    showToast,
+  });
 
   const startCall = useCallback(
     async (personaIdOverride?: string, scenarioIdOverride?: string) => {
+      cancelPendingTopicFetch();
       const targetPersonaId = personaIdOverride || selectedPersonaId || data?.personas[0]?.id || '';
       const targetScenarioId =
         scenarioIdOverride !== undefined ? scenarioIdOverride : selectedScenarioId;
@@ -179,6 +174,7 @@ export default function App() {
               personaId: targetPersonaId,
               scenarioId: targetScenarioId || undefined,
               topic: targetScenarioId ? undefined : suggestedTopic,
+              enableToneAnalysis,
             })
           );
         };
@@ -261,7 +257,16 @@ export default function App() {
         setCallState('idle');
       }
     },
-    [data, fetchBootstrap, selectedPersonaId, selectedScenarioId, showToast, suggestedTopic]
+    [
+      cancelPendingTopicFetch,
+      data,
+      enableToneAnalysis,
+      fetchBootstrap,
+      selectedPersonaId,
+      selectedScenarioId,
+      showToast,
+      suggestedTopic,
+    ]
   );
 
   const endCall = useCallback(() => {
@@ -288,11 +293,23 @@ export default function App() {
       wsRef.current.send(
         JSON.stringify({
           type: 'text_input',
-          text: 'Kannst du deinen letzten Satz bitte noch einmal langsamer auf Chinesisch sagen und kurz auf Deutsch erklären?',
+          text: 'Ich habe das nicht verstanden. Bitte nenne mir die chinesischen Wörter/Begriffe einzeln, erkläre sie mir klar auf Deutsch (und zeige sie als Vokabelkarte), und wiederhole den Satz danach noch einmal langsam auf Chinesisch.',
         })
       );
     }
   }, []);
+
+  const handleChangeComplexity = useCallback(
+    async (preference: 'auto' | 'short' | 'medium' | 'natural') => {
+      await fetch('/api/profile/complexity', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preference }),
+      });
+      await fetchBootstrap();
+    },
+    [fetchBootstrap]
+  );
 
   const handleAddMemoryFact = useCallback(
     async (category: string, fact: string) => {
@@ -368,9 +385,31 @@ export default function App() {
   return (
     <div className="app-shell">
       <header className="top-header">
-        <h1 className="brand-title">Learn Chinese</h1>
+        <button
+          type="button"
+          className="brand-button"
+          aria-label="Zurück zur Startseite"
+          onClick={() => setActiveTab('home')}
+        >
+          <img src="/logo.png" alt="C.AI Labs" className="brand-logo" width={38} height={38} />
+          <div className="brand-text">
+            <h1 className="brand-title">Learn Chinese</h1>
+            <span className="brand-subtitle" lang="zh-Hans">
+              中文对话 · C.AI Labs
+            </span>
+          </div>
+        </button>
 
         <nav className="tab-nav" aria-label="Hauptnavigation">
+          <button
+            type="button"
+            className="btn-tab"
+            aria-current={activeTab === 'home' ? 'page' : undefined}
+            onClick={() => setActiveTab('home')}
+          >
+            <Home size={15} aria-hidden="true" />
+            Startseite
+          </button>
           <button
             type="button"
             className="btn-tab"
@@ -437,13 +476,41 @@ export default function App() {
       )}
 
       <main>
+        {activeTab === 'home' && (
+          <HomeView
+            profile={data.profile}
+            stats={data.stats}
+            personas={data.personas}
+            scenarios={data.scenarios}
+            recentSessions={data.recentSessions}
+            memoryFactsCount={data.memoryFacts.length}
+            selectedPersonaId={selectedPersona.id}
+            onSelectPersona={(id) => {
+              setSelectedPersonaId(id);
+              if (selectedScenario && selectedScenario.persona_id !== id) {
+                setSelectedScenarioId('');
+              }
+            }}
+            onStartFreeTalk={() => {
+              setActiveTab('talk');
+              startCall();
+            }}
+            onNavigate={(tab) => setActiveTab(tab)}
+            onChangeComplexity={handleChangeComplexity}
+          />
+        )}
+
         {activeTab === 'talk' && (
           <FreeTalkView
             personas={data.personas}
             selectedPersona={selectedPersona}
             selectedScenario={selectedScenario}
             suggestedTopic={suggestedTopic}
+            isShufflingTopic={isShufflingTopic}
             callState={callState}
+            callDurationSeconds={callDurationSeconds}
+            enableToneAnalysis={enableToneAnalysis}
+            onToggleToneAnalysis={() => setEnableToneAnalysis((v) => !v)}
             statusMessage={statusMessage}
             isMuted={isMuted}
             micLevel={micLevel}
@@ -454,6 +521,7 @@ export default function App() {
             liveDraftUser={liveDraftUser}
             liveDraftAi={liveDraftAi}
             isTranscriptRevealed={isTranscriptRevealed}
+            onBackHome={() => setActiveTab('home')}
             onSelectPersona={(id) => {
               setSelectedPersonaId(id);
               if (selectedScenario && selectedScenario.persona_id !== id) {
@@ -472,6 +540,7 @@ export default function App() {
         {activeTab === 'vocab' && (
           <VocabularyView
             allVocabulary={data.allVocabulary}
+            dueVocabulary={data.dueVocabulary}
             dueCount={data.dueVocabulary.length}
             onAddVocabulary={handleAddVocabulary}
             onReviewVocabulary={handleManualVocabReview}
@@ -481,7 +550,10 @@ export default function App() {
         {activeTab === 'curriculum' && (
           <ScenariosView
             scenarios={data.scenarios}
+            remainingCurated={data.curriculumMeta?.remainingCurated ?? 0}
+            hasApiKey={data.hasApiKey}
             onStartScenario={(personaId, scenarioId) => startCall(personaId, scenarioId)}
+            onExpandCurriculum={handleExpandCurriculum}
           />
         )}
 

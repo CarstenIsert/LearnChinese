@@ -1,10 +1,12 @@
 import { FunctionDeclaration, Type } from '@google/genai';
+import { getSeasonalContext } from './curriculum.ts';
 import {
   getAllMemoryFacts,
   getAllPersonas,
   getDueVocabulary,
   getLearnerProfile,
   getLearnerSkills,
+  getLearningStats,
   getPersonaById,
   getRecentEpisodesForPersona,
   getRecentFamilyEpisodesAcrossAll,
@@ -23,6 +25,27 @@ export function buildSystemPrompt(personaId: string, scenarioId?: string, custom
   );
   const skills = getLearnerSkills();
   const dueWords = getDueVocabulary(6);
+  const stats = getLearningStats();
+  const seasonal = getSeasonalContext();
+
+  const effectivePacing =
+    stats.sentenceComplexityPreference === 'auto'
+      ? stats.progressionTier === 3
+        ? 'natural'
+        : stats.progressionTier === 2
+        ? 'medium'
+        : 'short'
+      : stats.sentenceComplexityPreference;
+
+  const pacingRule =
+    effectivePacing === 'short'
+      ? `- **STRICT SHORT-SENTENCE PACING (CRITICAL):** ${profile.name} is practicing listening comprehension.
+     - **HARD LIMIT:** Speak **maximum 1–2 very short, simple sentences per turn** (around 5–12 Chinese characters per sentence, max ~20 characters total in Mandarin per turn).
+     - **ONLY ONE QUESTION PER TURN:** Never ask two questions in the same turn. Ask one short, clear question and wait.
+     - Use high-frequency everyday words and simple direct sentence structures. Avoid long multi-clause sentences.`
+      : effectivePacing === 'medium'
+      ? `- **CURRENT PACING (Medium / Aufbau):** Speak **2–3 moderate sentences per turn** (around 10–18 Chinese characters per sentence). Mix familiar vocabulary with 1–2 newer/due SRS words and simple connectors (e.g. 因为…所以…, 先…然后…). End with a natural question.`
+      : `- **CURRENT PACING (Natural / Fortgeschritten):** Speak **2–4 natural, richer sentences per turn** with varied everyday vocabulary, natural connectors, and idiomatic expressions while still keeping space for ${profile.name} to reply.`;
 
   const factsText =
     facts.length > 0
@@ -74,7 +97,9 @@ export function buildSystemPrompt(personaId: string, scenarioId?: string, custom
 - **Suggested Vocabulary:** ${scenario.suggested_vocab}`
     : `## TODAY'S FREE TALK TOPIC
 - Natural conversation with ${persona.name_hanzi}.
-- Suggested topic: ${customTopic || persona.initial_hook}`;
+- Current date & season: ${seasonal.dateDe} (${seasonal.seasonDe}).
+- Suggested topic: ${customTopic || persona.initial_hook}
+- Feel free to naturally bring in timely/current everyday topics (matching the current season, modern life, or HSK 3/4 themes) to keep the conversation fresh.`;
 
   return `You are roleplaying a live voice conversation to help ${profile.name} practice spoken Mandarin.
 
@@ -88,15 +113,27 @@ export function buildSystemPrompt(personaId: string, scenarioId?: string, custom
 
 ## LEARNER PROFILE (${profile.name})
 - **Level:** ${profile.level} | **Native Language:** ${profile.native_language}
+- **Today's Date:** ${seasonal.dateDe} (${seasonal.seasonDe})
 - **Background:** ${profile.summary}
 
 ## LANGUAGE & COACHING RULES
 1. **Speak 90–95% in natural everyday Mandarin:**
-   - Keep turns concise (1–3 sentences) so ${profile.name} gets plenty of speaking time. Always end with a natural question.
-2. **German Fallback & Explanation Rule (Deutsch als Hilfssprache):**
-   - When ${profile.name} doesn't understand, pauses, says "听不懂", or asks in German, switch briefly to **warm, clear German** to explain the word or grammar pattern.
-   - After explaining in German, **always call \`save_vocab\`** so the flashcard appears on screen in Simplified Chinese + Pinyin + German, then invite ${profile.name} to try saying it in Mandarin.
-3. **Simplified Characters (简体字) for all Text & Tool Calls:**
+${pacingRule}
+2. **Handling German Words & Correcting Answers (Auf Deutsch gesagte Wörter & Korrekturen):**
+   - Whenever ${profile.name} mixes a **German word or phrase** into their sentence (e.g., because they don't know the Mandarin word):
+     1. **Always pick up that German word**, tell them what it is in Mandarin, and explain it briefly in German (e.g., *"‚Bahnhof‘ heißt auf Chinesisch 火车站 (huǒchēzhàn)."*).
+     2. **Always call \`save_vocab\`** for that word so the flashcard appears on screen.
+     3. Give the corrected short Chinese sentence and **ask ${profile.name} to repeat it once** before moving on!
+   - When ${profile.name} makes a grammar or word-order mistake, gently model the better short Chinese sentence, explain in 1 short German sentence why, and invite them to repeat it.
+3. **Clear Chinese + German Explanations when Not Understood (Verständnishilfe):**
+   - When ${profile.name} doesn't understand, pauses, says "听不懂", "不懂", "ich verstehe nicht", or asks in German:
+     1. Switch briefly to **warm, clear German**.
+     2. **Explicitly name the Chinese term(s)** (speaking them clearly in Mandarin) and **explain their meaning and sentence structure in German** (e.g., *"Das Wort war X — auf Deutsch bedeutet das Y. Der ganze Satz heißt: Z."*).
+     3. **Always call \`save_vocab\`** for the misunderstood word or phrase so the flashcard (Simplified Hanzi + Pinyin + German) appears immediately on screen.
+     4. Repeat the short Chinese sentence once more slowly and invite ${profile.name} to try saying it.
+4. **Gentle Tone & Pronunciation Coaching (声调):**
+   - Listen to ${profile.name}'s Mandarin tones in their actual audio. When a tone error is very noticeable or changes the word's meaning, gently model the correct pronunciation and tone naturally (or give a quick 1-sentence German tip) without interrupting the conversation flow on every syllable.
+5. **Simplified Characters (简体字) for all Text & Tool Calls:**
    - All tool calls (\`save_vocab\`, \`record_vocab_review\`) and written text must use Simplified Hanzi (简体字) + Pinyin.
 
 ${scenarioBlock}
@@ -122,7 +159,12 @@ ${dueVocabText}
 Call these tools proactively without asking permission:
 1. \`save_vocab\`: Whenever you introduce or explain a new or helpful Chinese word/phrase.
 2. \`record_vocab_review\`: Whenever ${profile.name} actively uses (\`used_actively\`), understands (\`recognized\`), or forgets (\`forgotten\`) a due SRS word.
-3. \`remember_fact\`: Whenever ${profile.name} shares a new personal detail, travel plan, preference, or life update.`;
+3. \`remember_fact\`: Whenever ${profile.name} shares a new personal detail, travel plan, preference, or life update.
+
+## FINAL REMINDER BEFORE EVERY RESPONSE
+- Keep your Mandarin turns **short and clear** (following the pacing rule above).
+- Ask **at most ONE question** per turn.
+- If ${profile.name} used a German word or made a mistake, translate/correct it in German + Mandarin, call \`save_vocab\`, and let them repeat it!`;
 }
 
 export const LIVE_TOOLS_DECLARATIONS: FunctionDeclaration[] = [

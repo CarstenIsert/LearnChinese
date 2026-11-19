@@ -116,6 +116,7 @@ export function initDatabase() {
       persona_id TEXT NOT NULL,
       target_grammar TEXT NOT NULL,
       suggested_vocab TEXT NOT NULL,
+      hsk_level TEXT NOT NULL DEFAULT 'HSK 3',
       mastery_score INTEGER NOT NULL DEFAULT 0,
       times_practiced INTEGER NOT NULL DEFAULT 0,
       last_practiced_at TEXT,
@@ -128,6 +129,7 @@ export function initDatabase() {
       scenario_id TEXT,
       started_at TEXT NOT NULL DEFAULT (datetime('now')),
       ended_at TEXT,
+      duration_seconds INTEGER NOT NULL DEFAULT 0,
       transcript_json TEXT NOT NULL DEFAULT '[]',
       summary_de TEXT,
       coaching_notes_json TEXT,
@@ -135,6 +137,30 @@ export function initDatabase() {
       FOREIGN KEY (persona_id) REFERENCES personas(id)
     );
   `);
+
+  // Safe schema migrations for existing databases
+  const sessionCols = db.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>;
+  if (!sessionCols.some((c) => c.name === 'duration_seconds')) {
+    db.exec(`ALTER TABLE sessions ADD COLUMN duration_seconds INTEGER NOT NULL DEFAULT 0`);
+  }
+
+  const profileCols = db
+    .prepare(`PRAGMA table_info(learner_profile)`)
+    .all() as Array<{ name: string }>;
+  if (!profileCols.some((c) => c.name === 'sentence_complexity')) {
+    db.exec(
+      `ALTER TABLE learner_profile ADD COLUMN sentence_complexity TEXT NOT NULL DEFAULT 'auto'`
+    );
+  }
+
+  const scenarioCols = db
+    .prepare(`PRAGMA table_info(curriculum_scenarios)`)
+    .all() as Array<{ name: string }>;
+  if (!scenarioCols.some((c) => c.name === 'hsk_level')) {
+    db.exec(
+      `ALTER TABLE curriculum_scenarios ADD COLUMN hsk_level TEXT NOT NULL DEFAULT 'HSK 3'`
+    );
+  }
 
   const seedData = loadLocalOrGenericSeed();
   const personasToSeed =
@@ -237,6 +263,118 @@ export function getLearnerProfile() {
     level: string;
     native_language: string;
     summary: string;
+    sentence_complexity?: 'auto' | 'short' | 'medium' | 'natural';
+  };
+}
+
+export function updateSentenceComplexityPreference(
+  preference: 'auto' | 'short' | 'medium' | 'natural'
+) {
+  db.prepare(`UPDATE learner_profile SET sentence_complexity = ?, updated_at = datetime('now') WHERE id = 1`).run(
+    preference
+  );
+}
+
+export function getLearningStats() {
+  const durationExpr = `CASE WHEN duration_seconds > 0 THEN duration_seconds WHEN ended_at IS NOT NULL THEN MAX(0, CAST((julianday(ended_at) - julianday(started_at)) * 86400 AS INTEGER)) ELSE 0 END`;
+
+  const totalRow = db
+    .prepare(
+      `SELECT COUNT(*) as totalSessions, COALESCE(SUM(${durationExpr}), 0) as totalSeconds FROM sessions WHERE ended_at IS NOT NULL`
+    )
+    .get() as { totalSessions: number; totalSeconds: number };
+
+  const todayRow = db
+    .prepare(
+      `SELECT COALESCE(SUM(${durationExpr}), 0) as todaySeconds FROM sessions WHERE ended_at IS NOT NULL AND date(started_at, 'localtime') = date('now', 'localtime')`
+    )
+    .get() as { todaySeconds: number };
+
+  const weekRow = db
+    .prepare(
+      `SELECT COALESCE(SUM(${durationExpr}), 0) as weekSeconds FROM sessions WHERE ended_at IS NOT NULL AND datetime(started_at) >= datetime('now', '-7 days')`
+    )
+    .get() as { weekSeconds: number };
+
+  const vocabStats = db
+    .prepare(
+      `SELECT
+         COUNT(*) as totalVocabulary,
+         SUM(CASE WHEN date(created_at, 'localtime') = date('now', 'localtime') THEN 1 ELSE 0 END) as newWordsToday,
+         SUM(CASE WHEN datetime(created_at) >= datetime('now', '-7 days') THEN 1 ELSE 0 END) as newWordsLast7Days,
+         SUM(CASE WHEN streak >= 2 OR times_used_actively >= 1 THEN 1 ELSE 0 END) as masteredWords,
+         SUM(CASE WHEN datetime(next_review_at) <= datetime('now', '+2 hours') THEN 1 ELSE 0 END) as dueWords
+       FROM vocabulary`
+    )
+    .get() as {
+    totalVocabulary: number;
+    newWordsToday: number;
+    newWordsLast7Days: number;
+    masteredWords: number;
+    dueWords: number;
+  };
+
+  // Compute consecutive learning day streak (UTC/localtime dates)
+  const sessionDays = db
+    .prepare(
+      `SELECT DISTINCT date(started_at, 'localtime') as day FROM sessions WHERE ended_at IS NOT NULL ORDER BY day DESC`
+    )
+    .all() as Array<{ day: string }>;
+
+  let streakDays = 0;
+  if (sessionDays.length > 0) {
+    const todayStr = (
+      db.prepare(`SELECT date('now', 'localtime') as d`).get() as { d: string }
+    ).d;
+    const yesterdayStr = (
+      db.prepare(`SELECT date('now', 'localtime', '-1 day') as d`).get() as { d: string }
+    ).d;
+
+    if (sessionDays[0].day === todayStr || sessionDays[0].day === yesterdayStr) {
+      let expectedDate = new Date(`${sessionDays[0].day}T00:00:00`);
+      for (const row of sessionDays) {
+        const rowStr = row.day;
+        const expectedStr = expectedDate.toISOString().slice(0, 10);
+        if (rowStr === expectedStr) {
+          streakDays += 1;
+          expectedDate.setDate(expectedDate.getDate() - 1);
+        } else {
+          break;
+        }
+      }
+    }
+  }
+
+  const totalSessions = totalRow.totalSessions || 0;
+  const masteredWords = vocabStats.masteredWords || 0;
+
+  let progressionTier: 1 | 2 | 3 = 1;
+  let progressionLabelDe = 'Stufe 1 · Kurze, klare Sätze';
+  if (totalSessions >= 15 && masteredWords >= 40) {
+    progressionTier = 3;
+    progressionLabelDe = 'Stufe 3 · Natürliche, längere Sätze';
+  } else if (totalSessions >= 5 && masteredWords >= 15) {
+    progressionTier = 2;
+    progressionLabelDe = 'Stufe 2 · Mittlere Sätze & Nebensätze';
+  }
+
+  const profile = getLearnerProfile();
+  const sentenceComplexityPreference = profile?.sentence_complexity || 'auto';
+
+  return {
+    totalSeconds: totalRow.totalSeconds || 0,
+    todaySeconds: todayRow.todaySeconds || 0,
+    weekSeconds: weekRow.weekSeconds || 0,
+    totalSessions,
+    totalVocabulary: vocabStats.totalVocabulary || 0,
+    newWordsToday: vocabStats.newWordsToday || 0,
+    newWordsLast7Days: vocabStats.newWordsLast7Days || 0,
+    masteredWords,
+    dueWords: vocabStats.dueWords || 0,
+    streakDays,
+    progressionTier,
+    progressionLabelDe,
+    sentenceComplexityPreference,
   };
 }
 
@@ -487,6 +625,7 @@ export function getAllScenarios() {
     voice_name: string;
     target_grammar: string;
     suggested_vocab: string;
+    hsk_level: string;
     mastery_score: number;
     times_practiced: number;
     last_practiced_at: string | null;

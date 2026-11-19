@@ -1,4 +1,5 @@
 import { GoogleGenAI, Type } from '@google/genai';
+import { maybeAutoExpandCurriculum } from './curriculum.ts';
 import {
   addMemoryFact,
   db,
@@ -20,6 +21,7 @@ export interface SessionReflectionResult {
   summary_de: string;
   episode_summary_for_persona: string;
   next_hook_for_persona: string;
+  duration_seconds?: number;
   new_facts: Array<{
     id?: number;
     category: string;
@@ -30,6 +32,12 @@ export interface SessionReflectionResult {
     better_taiwan_mandarin: string;
     pinyin: string;
     explanation_de: string;
+  }>;
+  tone_feedback: Array<{
+    word_or_phrase: string;
+    pinyin: string;
+    what_was_heard: string;
+    correction_de: string;
   }>;
   skill_updates: Array<{
     skill_name: string;
@@ -56,8 +64,11 @@ export async function analyzeAndPersistSession(params: {
   personaId: string;
   scenarioId?: string;
   transcript: TranscriptEntry[];
+  userAudioWavBase64?: string;
+  durationSeconds?: number;
 }): Promise<SessionReflectionResult> {
-  const { apiKey, sessionId, personaId, scenarioId, transcript } = params;
+  const { apiKey, sessionId, personaId, scenarioId, transcript, userAudioWavBase64, durationSeconds } =
+    params;
   const persona = getPersonaById(personaId);
   const existingFacts = getAllMemoryFacts();
 
@@ -68,15 +79,17 @@ export async function analyzeAndPersistSession(params: {
         : 'Kurzes Testgespräch ohne gespeichertes Transkript.',
     episode_summary_for_persona: 'Short catch-up conversation.',
     next_hook_for_persona: 'Ask how Mandarin practice has been going this week.',
+    duration_seconds: durationSeconds,
     new_facts: [],
     coaching_tips: [],
+    tone_feedback: [],
     skill_updates: [],
     vocab_extracted: [],
     scenario_mastery_delta: transcript.length >= 4 ? 1 : 0,
   };
 
   if (transcript.length === 0 || !apiKey || apiKey === 'your_gemini_api_key_here') {
-    persistReflectionToDb(sessionId, personaId, scenarioId, transcript, fallbackResult);
+    persistReflectionToDb(sessionId, personaId, scenarioId, transcript, fallbackResult, durationSeconds);
     return fallbackResult;
   }
 
@@ -92,6 +105,10 @@ export async function analyzeAndPersistSession(params: {
       .join('\n');
 
     const existingFactsList = existingFacts.map((f) => `- [${f.category}] ${f.fact}`).join('\n');
+
+    const audioInstruction = userAudioWavBase64
+      ? `\n8. AUDIO TONE & PRONUNCIATION ANALYSIS (\`tone_feedback\`): Listen carefully to the attached WAV recording of ${learnerName}'s spoken Mandarin. Identify 1 to 3 specific words or short phrases where ${learnerName}'s Mandarin tones (声调: 1st flat, 2nd rising, 3rd dipping, 4th falling) or initials/finals sounded off or flat. Describe what you actually heard in the audio (\`what_was_heard\`) and give a clear, encouraging correction in German (\`correction_de\`) with the target Simplified Hanzi (\`word_or_phrase\`) and Pinyin (\`pinyin\`). If ${learnerName} only spoke German or audio was unclear, return an empty array.`
+      : `\n8. Set \`tone_feedback\` to an empty array (no audio recording attached).`;
 
     const prompt = `Analyze this Mandarin learning conversation between ${learnerName} (${profile?.level || 'HSK 3'} level, native ${profile?.native_language || 'German'} speaker) and conversation partner "${persona?.name_hanzi ?? personaId}" (${persona?.relationship_de}).
 
@@ -110,11 +127,23 @@ Return a structured JSON analysis that:
 4. Provides 1 to 3 helpful Mandarin coaching tips (\`coaching_tips\`) comparing something ${learnerName} said (or tried to say) with a natural Mandarin phrasing (in Simplified Characters + Pinyin + German explanation).
 5. Identifies 1 or 2 grammar/communicative skill observations (\`skill_updates\`) with status ("struggling", "practicing", or "comfortable").
 6. Extracts up to 3 key vocabulary words from the chat that were important or new (\`vocab_extracted\`, in Simplified Characters + Pinyin + German).
-7. Sets \`scenario_mastery_delta\` to 1 if ${learnerName} participated meaningfully, 2 if they handled the scenario very well, or 0 if too brief.`;
+7. Sets \`scenario_mastery_delta\` to 1 if ${learnerName} participated meaningfully, 2 if they handled the scenario very well, or 0 if too brief.${audioInstruction}`;
+
+    const contentsPayload = userAudioWavBase64
+      ? [
+          {
+            inlineData: {
+              mimeType: 'audio/wav',
+              data: userAudioWavBase64,
+            },
+          },
+          { text: prompt },
+        ]
+      : prompt;
 
     const response = await ai.models.generateContent({
       model: 'gemini-3.8-flash',
-      contents: prompt,
+      contents: contentsPayload,
       config: {
         responseMimeType: 'application/json',
         responseSchema: {
@@ -145,6 +174,19 @@ Return a structured JSON analysis that:
                   explanation_de: { type: Type.STRING },
                 },
                 required: ['what_you_said', 'better_taiwan_mandarin', 'pinyin', 'explanation_de'],
+              },
+            },
+            tone_feedback: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  word_or_phrase: { type: Type.STRING },
+                  pinyin: { type: Type.STRING },
+                  what_was_heard: { type: Type.STRING },
+                  correction_de: { type: Type.STRING },
+                },
+                required: ['word_or_phrase', 'pinyin', 'what_was_heard', 'correction_de'],
               },
             },
             skill_updates: {
@@ -185,6 +227,7 @@ Return a structured JSON analysis that:
             'next_hook_for_persona',
             'new_facts',
             'coaching_tips',
+            'tone_feedback',
             'skill_updates',
             'vocab_extracted',
             'scenario_mastery_delta',
@@ -194,11 +237,29 @@ Return a structured JSON analysis that:
     });
 
     const parsed = JSON.parse(response.text || '{}') as SessionReflectionResult;
-    const savedResult = persistReflectionToDb(sessionId, personaId, scenarioId, transcript, parsed);
+    parsed.duration_seconds = durationSeconds;
+    const savedResult = persistReflectionToDb(
+      sessionId,
+      personaId,
+      scenarioId,
+      transcript,
+      parsed,
+      durationSeconds
+    );
+    await maybeAutoExpandCurriculum(apiKey).catch((err) => {
+      console.warn('Auto curriculum expansion skipped:', err);
+    });
     return savedResult;
   } catch (err) {
     console.error('Post-session analyzer error:', err);
-    persistReflectionToDb(sessionId, personaId, scenarioId, transcript, fallbackResult);
+    persistReflectionToDb(
+      sessionId,
+      personaId,
+      scenarioId,
+      transcript,
+      fallbackResult,
+      durationSeconds
+    );
     return fallbackResult;
   }
 }
@@ -208,7 +269,8 @@ function persistReflectionToDb(
   personaId: string,
   scenarioId: string | undefined,
   transcript: TranscriptEntry[],
-  result: SessionReflectionResult
+  result: SessionReflectionResult,
+  durationSeconds?: number
 ): SessionReflectionResult {
   // 1. Save new facts
   const savedFacts: SessionReflectionResult['new_facts'] = [];
@@ -264,12 +326,14 @@ function persistReflectionToDb(
   db.prepare(`
     UPDATE sessions
     SET ended_at = datetime('now'),
+        duration_seconds = COALESCE(?, duration_seconds),
         transcript_json = ?,
         summary_de = ?,
         coaching_notes_json = ?,
         extracted_memories_json = ?
     WHERE id = ?
   `).run(
+    durationSeconds ?? null,
     JSON.stringify(transcript),
     result.summary_de,
     JSON.stringify(result.coaching_tips || []),

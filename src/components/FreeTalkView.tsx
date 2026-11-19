@@ -1,5 +1,7 @@
 import React from 'react';
 import {
+  ArrowLeft,
+  Clock,
   Eye,
   EyeOff,
   HelpCircle,
@@ -21,7 +23,11 @@ interface FreeTalkViewProps {
   selectedPersona: Persona;
   selectedScenario?: CurriculumScenario;
   suggestedTopic: string;
+  isShufflingTopic?: boolean;
   callState: 'idle' | 'connecting' | 'in_call' | 'analyzing';
+  callDurationSeconds: number;
+  enableToneAnalysis: boolean;
+  onToggleToneAnalysis: () => void;
   statusMessage: string;
   isMuted: boolean;
   micLevel: number;
@@ -32,6 +38,7 @@ interface FreeTalkViewProps {
   liveDraftUser: string;
   liveDraftAi: string;
   isTranscriptRevealed: boolean;
+  onBackHome: () => void;
   onSelectPersona: (personaId: string) => void;
   onShuffleTopic: () => void;
   onStartCall: () => void;
@@ -46,7 +53,11 @@ export function FreeTalkView({
   selectedPersona,
   selectedScenario,
   suggestedTopic,
+  isShufflingTopic,
   callState,
+  callDurationSeconds,
+  enableToneAnalysis,
+  onToggleToneAnalysis,
   statusMessage,
   isMuted,
   micLevel,
@@ -57,6 +68,7 @@ export function FreeTalkView({
   liveDraftUser,
   liveDraftAi,
   isTranscriptRevealed,
+  onBackHome,
   onSelectPersona,
   onShuffleTopic,
   onStartCall,
@@ -68,8 +80,20 @@ export function FreeTalkView({
   const displayedVocab =
     liveVocabPopups.length > 0 ? liveVocabPopups : dueVocabulary.slice(0, 4);
 
+  const mins = String(Math.floor(callDurationSeconds / 60)).padStart(2, '0');
+  const secs = String(callDurationSeconds % 60).padStart(2, '0');
+
   return (
     <section aria-label="Free Talk">
+      {callState === 'idle' && (
+        <div className="subpage-back-row">
+          <button type="button" className="btn-back-home" onClick={onBackHome}>
+            <ArrowLeft size={15} aria-hidden="true" />
+            Zurück zur Startseite
+          </button>
+        </div>
+      )}
+
       <div className="hero-talk-card">
         {callState === 'idle' && (
           <div className="partner-pills" role="group" aria-label="Gesprächspartner wählen">
@@ -115,7 +139,7 @@ export function FreeTalkView({
             </span>
           </h2>
           <p style={{ margin: '0.15rem 0 0', color: 'var(--text-muted)', fontSize: '0.88rem' }}>
-            {selectedPersona.relationship_de} · Stimme: {selectedPersona.voice_name}
+            {selectedPersona.relationship_de}
           </p>
         </div>
 
@@ -139,32 +163,54 @@ export function FreeTalkView({
             <button
               type="button"
               onClick={onShuffleTopic}
-              title="Neues zufälliges Thema vorschlagen"
+              disabled={isShufflingTopic}
+              title="Neues zufälliges, aktuelles Thema vorschlagen"
               style={{ fontSize: '0.82rem', padding: '0.4rem 0.75rem' }}
             >
               <Shuffle size={14} aria-hidden="true" />
-              Anderes Thema
+              {isShufflingTopic ? 'Suche Thema...' : 'Aktuelles Thema'}
             </button>
           </div>
         )}
 
         {callState === 'idle' ? (
-          <div className="call-controls">
-            <button
-              type="button"
-              className="btn-primary"
-              style={{ padding: '0.75rem 1.75rem', fontSize: '1.05rem' }}
-              onClick={onStartCall}
-            >
-              <PhoneCall size={18} aria-hidden="true" />
-              Free Talk starten
-            </button>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.7rem' }}>
+            <div className="call-controls">
+              <button
+                type="button"
+                className="btn-primary"
+                style={{ padding: '0.75rem 1.75rem', fontSize: '1.05rem' }}
+                onClick={onStartCall}
+              >
+                <PhoneCall size={18} aria-hidden="true" />
+                Free Talk starten
+              </button>
+              <button
+                type="button"
+                className={`partner-pill ${enableToneAnalysis ? 'active' : ''}`}
+                onClick={onToggleToneAnalysis}
+                title="Optional: Analysiert am Gesprächsende deine Mandarin-Töne anhand der Audioaufnahme"
+              >
+                Ton-Analyse (Audio): {enableToneAnalysis ? 'An' : 'Aus'}
+              </button>
+            </div>
           </div>
         ) : (
           <>
-            <p style={{ margin: 0, color: 'var(--accent)', fontSize: '0.92rem' }}>
-              {statusMessage}
-            </p>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', flexWrap: 'wrap', justifyContent: 'center' }}>
+              {callState === 'in_call' && (
+                <span className="badge badge-gold">
+                  <Clock size={12} aria-hidden="true" />
+                  {mins}:{secs}
+                </span>
+              )}
+              {callState === 'in_call' && enableToneAnalysis && (
+                <span className="badge badge-emerald">Ton-Analyse aktiv</span>
+              )}
+              <p style={{ margin: 0, color: 'var(--accent)', fontSize: '0.92rem' }}>
+                {statusMessage}
+              </p>
+            </div>
 
             {callState === 'in_call' && (
               <div className="call-controls">
@@ -182,7 +228,7 @@ export function FreeTalkView({
 
                 <button type="button" onClick={onRequestGermanHelp}>
                   <HelpCircle size={16} aria-hidden="true" />
-                  Auf Deutsch erklären
+                  Verstehe ich nicht (Deutsch)
                 </button>
 
                 <button type="button" className="btn-danger" onClick={onEndCall}>

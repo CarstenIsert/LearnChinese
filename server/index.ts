@@ -1,10 +1,18 @@
-import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
+import { GoogleGenAI, LiveServerMessage, Modality, Type } from '@google/genai';
 import dotenv from 'dotenv';
 import express from 'express';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
 import { analyzeAndPersistSession, TranscriptEntry } from './analyzer.ts';
+import {
+  expandCurriculumNext,
+  HSK_CURRICULUM_PROGRESSION,
+  maybeAutoExpandCurriculum,
+  suggestCurrentTopic,
+} from './curriculum.ts';
 import {
   addMemoryFact,
   db,
@@ -16,11 +24,13 @@ import {
   getDueVocabulary,
   getLearnerProfile,
   getLearnerSkills,
+  getLearningStats,
   getPersonaById,
   getRecentFamilyEpisodesAcrossAll,
   initDatabase,
   recordVocabularyReview,
   saveOrUpdateVocabulary,
+  updateSentenceComplexityPreference,
 } from './db.ts';
 import { buildSystemPrompt, LIVE_TOOLS_DECLARATIONS } from './prompts.ts';
 
@@ -34,6 +44,120 @@ app.use(express.json({ limit: '5mb' }));
 
 const PORT = Number(process.env.PORT || 6889);
 const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-3.8-live';
+const TTS_CACHE_DIR = path.resolve(process.cwd(), 'data', 'tts-cache');
+if (!fs.existsSync(TTS_CACHE_DIR)) {
+  fs.mkdirSync(TTS_CACHE_DIR, { recursive: true });
+}
+
+async function synthesizeMandarinWithLive(
+  ai: GoogleGenAI,
+  text: string,
+  voiceName: string
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let settled = false;
+    let session: any = null;
+
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        try {
+          session?.close();
+        } catch {
+          // ignore
+        }
+        reject(new Error('TTS generation timed out'));
+      }
+    }, 12000);
+
+    ai.live
+      .connect({
+        model: LIVE_MODEL,
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName,
+              },
+            },
+          },
+          systemInstruction: {
+            parts: [
+              {
+                text: 'You are a Mandarin pronunciation dictionary. When given a Chinese word or sentence, ONLY read that exact Chinese text aloud once clearly in standard Mandarin at a calm learner pace. Do not add any extra words or commentary.',
+              },
+            ],
+          },
+        },
+        callbacks: {
+          onmessage: (msg: LiveServerMessage) => {
+            const parts = msg.serverContent?.modelTurn?.parts || [];
+            for (const part of parts) {
+              if (part.inlineData?.data && part.inlineData.mimeType?.startsWith('audio/')) {
+                chunks.push(Buffer.from(part.inlineData.data, 'base64'));
+              }
+            }
+            if (msg.serverContent?.turnComplete && !settled) {
+              settled = true;
+              clearTimeout(timer);
+              try {
+                session?.close();
+              } catch {
+                // ignore
+              }
+              if (chunks.length === 0) {
+                reject(new Error('No audio returned from Gemini Live TTS'));
+              } else {
+                resolve(Buffer.concat(chunks));
+              }
+            }
+          },
+          onerror: (err: any) => {
+            if (!settled) {
+              settled = true;
+              clearTimeout(timer);
+              reject(err instanceof Error ? err : new Error(String(err?.message || err)));
+            }
+          },
+          onclose: () => {
+            if (!settled) {
+              settled = true;
+              clearTimeout(timer);
+              if (chunks.length > 0) {
+                resolve(Buffer.concat(chunks));
+              } else {
+                reject(new Error('Gemini Live TTS connection closed before audio completed'));
+              }
+            }
+          },
+        },
+      })
+      .then((s) => {
+        session = s;
+        if (!settled) {
+          s.sendClientContent({
+            turns: [{ role: 'user', parts: [{ text }] }],
+            turnComplete: true,
+          });
+        } else {
+          try {
+            s.close();
+          } catch {
+            // ignore
+          }
+        }
+      })
+      .catch((err) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        }
+      });
+  });
+}
 
 function getApiKey(): string {
   return (process.env.GEMINI_API_KEY || '').trim();
@@ -53,10 +177,13 @@ app.get('/api/status', (_req, res) => {
   });
 });
 
-app.get('/api/bootstrap', (_req, res) => {
+app.get('/api/bootstrap', async (_req, res) => {
+  await maybeAutoExpandCurriculum().catch(() => null);
   const profile = getLearnerProfile();
   const personas = getAllPersonas();
   const scenarios = getAllScenarios();
+  const existingIds = new Set(scenarios.map((s) => s.id));
+  const remainingCurated = HSK_CURRICULUM_PROGRESSION.filter((c) => !existingIds.has(c.id)).length;
   const memoryFacts = getAllMemoryFacts();
   const recentEpisodes = getRecentFamilyEpisodesAcrossAll(8);
   const skills = getLearnerSkills();
@@ -64,7 +191,7 @@ app.get('/api/bootstrap', (_req, res) => {
   const allVocabulary = getAllVocabulary();
   const recentSessions = db
     .prepare(`
-      SELECT s.id, s.persona_id, s.scenario_id, s.started_at, s.ended_at, s.summary_de,
+      SELECT s.id, s.persona_id, s.scenario_id, s.started_at, s.ended_at, s.duration_seconds, s.summary_de,
              p.name_hanzi as persona_name, p.avatar_emoji as persona_emoji
       FROM sessions s
       JOIN personas p ON p.id = s.persona_id
@@ -73,12 +200,16 @@ app.get('/api/bootstrap', (_req, res) => {
     `)
     .all();
 
+  const stats = getLearningStats();
+
   res.json({
     hasApiKey: hasValidApiKey(),
     liveModel: LIVE_MODEL,
     profile,
+    stats,
     personas,
     scenarios,
+    curriculumMeta: { remainingCurated },
     memoryFacts,
     recentEpisodes,
     skills,
@@ -86,6 +217,160 @@ app.get('/api/bootstrap', (_req, res) => {
     allVocabulary,
     recentSessions,
   });
+});
+
+app.post('/api/profile/complexity', (req, res) => {
+  const { preference } = req.body as { preference?: string };
+  const valid =
+    preference === 'short' ||
+    preference === 'medium' ||
+    preference === 'natural' ||
+    preference === 'auto';
+  if (!valid) {
+    res.status(400).json({ error: 'Invalid complexity preference' });
+    return;
+  }
+  updateSentenceComplexityPreference(preference);
+  res.json({ ok: true, stats: getLearningStats(), profile: getLearnerProfile() });
+});
+
+app.post('/api/topics/suggest', async (req, res) => {
+  const { personaId, recentTopics } = (req.body || {}) as {
+    personaId?: string;
+    recentTopics?: string[];
+  };
+  const result = await suggestCurrentTopic({
+    apiKey: getApiKey(),
+    personaId,
+    recentTopics: Array.isArray(recentTopics) ? recentTopics.slice(0, 10) : [],
+  });
+  res.json(result);
+});
+
+app.post('/api/curriculum/expand', async (req, res) => {
+  const { targetLevel } = (req.body || {}) as { targetLevel?: 'HSK 3' | 'HSK 4' };
+  const validLevel = targetLevel === 'HSK 3' || targetLevel === 'HSK 4' ? targetLevel : undefined;
+  const result = await expandCurriculumNext({
+    apiKey: getApiKey(),
+    targetLevel: validLevel,
+  });
+  res.json({
+    ...result,
+    scenarios: getAllScenarios(),
+  });
+});
+
+app.get('/api/tts', async (req, res) => {
+  const rawText = typeof req.query.text === 'string' ? req.query.text.trim() : '';
+  if (!rawText || rawText.length > 200) {
+    res.status(400).json({ error: 'Text must be between 1 and 200 characters' });
+    return;
+  }
+
+  const voiceName = 'Kore';
+  const cacheKey = crypto.createHash('sha256').update(`v2:${voiceName}:${rawText}`).digest('hex');
+  const cacheFile = path.join(TTS_CACHE_DIR, `${cacheKey}.wav`);
+
+  if (fs.existsSync(cacheFile)) {
+    res.setHeader('Content-Type', 'audio/wav');
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.sendFile(cacheFile);
+    return;
+  }
+
+  if (!hasValidApiKey()) {
+    res.status(503).json({ error: 'GEMINI_API_KEY missing or invalid' });
+    return;
+  }
+
+  try {
+    const ai = new GoogleGenAI({ apiKey: getApiKey() });
+    const pcmBuffer = await synthesizeMandarinWithLive(ai, rawText, voiceName);
+    // Pad with 100ms leading and 350ms trailing silence (24kHz 16-bit mono) so browser audio never clips short words
+    const leadSilence = Buffer.alloc(4800);
+    const trailSilence = Buffer.alloc(16800);
+    const paddedPcm = Buffer.concat([leadSilence, pcmBuffer, trailSilence]);
+    const wavBuffer = wrapPcm16AsWav(paddedPcm, 24000);
+    fs.writeFileSync(cacheFile, wavBuffer);
+
+    res.setHeader('Content-Type', 'audio/wav');
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(wavBuffer);
+  } catch (err: any) {
+    console.error('Gemini TTS error:', err);
+    res.status(500).json({ error: err?.message || 'TTS generation failed' });
+  }
+});
+
+app.post('/api/vocabulary/check-pronunciation', async (req, res) => {
+  const { targetHanzi, targetPinyin, targetGerman, audioBase64, mimeType } = req.body as {
+    targetHanzi?: string;
+    targetPinyin?: string;
+    targetGerman?: string;
+    audioBase64?: string;
+    mimeType?: string;
+  };
+
+  if (!targetHanzi || !audioBase64 || !mimeType) {
+    res.status(400).json({ error: 'targetHanzi, audioBase64, and mimeType are required' });
+    return;
+  }
+
+  if (!hasValidApiKey()) {
+    res.status(503).json({ error: 'GEMINI_API_KEY missing or invalid' });
+    return;
+  }
+
+  try {
+    const ai = new GoogleGenAI({ apiKey: getApiKey() });
+    const prompt = `You are a strict yet encouraging Mandarin Chinese pronunciation and tone coach for a German-speaking learner.
+The learner tried to pronounce the target Mandarin word/phrase:
+- Target Hanzi: ${targetHanzi}
+- Target Pinyin: ${targetPinyin || '(unknown)'}
+- German meaning: ${targetGerman || ''}
+
+Listen carefully to the attached audio recording. Evaluate:
+1. Did they say the right syllables/word?
+2. Are the Mandarin tones (声调: 1st flat, 2nd rising, 3rd dipping, 4th falling, neutral) accurate?
+
+Return structured JSON with:
+- passed (boolean): true if the word is clearly recognizable and the tones are mostly accurate; false if the wrong word was said or a tone is clearly off.
+- heard_text (string): what you heard in Simplified Chinese / Pinyin (or "(nichts verstanden)" if silent/unclear).
+- tone_accuracy_de (string): concise assessment of each syllable's tone in German (e.g. "1. Silbe (2. Ton) gut steigend, 2. Silbe (4. Ton) etwas zu flach").
+- tip_de (string): 1–2 encouraging sentences in German on how to improve or confirming it sounded great.`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: [
+        {
+          inlineData: {
+            mimeType,
+            data: audioBase64,
+          },
+        },
+        { text: prompt },
+      ],
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            passed: { type: Type.BOOLEAN },
+            heard_text: { type: Type.STRING },
+            tone_accuracy_de: { type: Type.STRING },
+            tip_de: { type: Type.STRING },
+          },
+          required: ['passed', 'heard_text', 'tone_accuracy_de', 'tip_de'],
+        },
+      },
+    });
+
+    const result = JSON.parse(response.text || '{}');
+    res.json(result);
+  } catch (err: any) {
+    console.error('Pronunciation check error:', err);
+    res.status(500).json({ error: err?.message || 'Pronunciation check failed' });
+  }
 });
 
 app.post('/api/memories', (req, res) => {
@@ -147,6 +432,48 @@ if (process.env.NODE_ENV === 'production') {
 
 const server = http.createServer(app);
 
+// --- Audio Helper for Post-Session Tone Analysis ---
+const MAX_BUFFERED_PCM_BYTES = 4_800_000; // ~150s of 16kHz 16-bit mono speech
+
+function computePcm16Rms(pcmBuffer: Buffer): number {
+  const sampleCount = Math.floor(pcmBuffer.length / 2);
+  if (sampleCount === 0) return 0;
+  let sumSquares = 0;
+  for (let i = 0; i < sampleCount; i++) {
+    const sample = pcmBuffer.readInt16LE(i * 2);
+    sumSquares += sample * sample;
+  }
+  return Math.sqrt(sumSquares / sampleCount);
+}
+
+function wrapPcm16AsWav(pcmData: Buffer, sampleRate: number): Buffer {
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + pcmData.length, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16); // PCM chunk size
+  header.writeUInt16LE(1, 20); // PCM format
+  header.writeUInt16LE(1, 22); // mono
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * 2, 28); // byte rate
+  header.writeUInt16LE(2, 32); // block align
+  header.writeUInt16LE(16, 34); // bits per sample
+  header.write('data', 36);
+  header.writeUInt32LE(pcmData.length, 40);
+  return Buffer.concat([header, pcmData]);
+}
+
+function buildWavBase64FromPcm16(chunks: Buffer[], sampleRate = 16000): string | undefined {
+  if (chunks.length === 0) return undefined;
+  const pcmData = Buffer.concat(chunks);
+  if (pcmData.length < sampleRate * 2 * 0.6) {
+    // Less than ~0.6s of speech is too short for reliable tone analysis
+    return undefined;
+  }
+  return wrapPcm16AsWav(pcmData, sampleRate).toString('base64');
+}
+
 // --- WebSocket Server for Gemini Multimodal Live API ---
 
 const wss = new WebSocketServer({ server, path: '/ws/live' });
@@ -156,6 +483,10 @@ wss.on('connection', (clientWs: WebSocket) => {
   let currentSessionDbId: number | null = null;
   let currentPersonaId = 'coach-lin';
   let currentScenarioId: string | undefined = undefined;
+  let sessionStartMs = 0;
+  let toneAnalysisEnabled = false;
+  const userSpeechChunks: Buffer[] = [];
+  let userSpeechBytes = 0;
   const transcript: TranscriptEntry[] = [];
   let currentAiTurnText = '';
   let currentUserTurnText = '';
@@ -213,6 +544,10 @@ wss.on('connection', (clientWs: WebSocket) => {
           .prepare('INSERT INTO sessions (persona_id, scenario_id) VALUES (?, ?)')
           .run(currentPersonaId, currentScenarioId ?? null);
         currentSessionDbId = Number(info.lastInsertRowid);
+        sessionStartMs = Date.now();
+        toneAnalysisEnabled = Boolean(msg.enableToneAnalysis);
+        userSpeechChunks.length = 0;
+        userSpeechBytes = 0;
 
         const ai = new GoogleGenAI({ apiKey: getApiKey() });
 
@@ -456,6 +791,17 @@ wss.on('connection', (clientWs: WebSocket) => {
 
       // 2. Stream PCM 16kHz microphone audio chunk
       else if (msg.type === 'audio_input' && geminiSession) {
+        if (toneAnalysisEnabled && typeof msg.data === 'string' && msg.data.length > 0) {
+          const pcmBuf = Buffer.from(msg.data, 'base64');
+          if (computePcm16Rms(pcmBuf) > 100) {
+            userSpeechChunks.push(pcmBuf);
+            userSpeechBytes += pcmBuf.length;
+            while (userSpeechBytes > MAX_BUFFERED_PCM_BYTES && userSpeechChunks.length > 0) {
+              const removed = userSpeechChunks.shift();
+              if (removed) userSpeechBytes -= removed.length;
+            }
+          }
+        }
         geminiSession.sendRealtimeInput({
           audio: {
             data: msg.data,
@@ -502,8 +848,14 @@ wss.on('connection', (clientWs: WebSocket) => {
 
         sendToClient({
           type: 'analyzing_session',
-          message: 'Gespräch wird ausgewertet & Erinnerungen werden gespeichert...',
+          message: 'Gespräch & Aussprache werden ausgewertet...',
         });
+
+        const durationSeconds =
+          sessionStartMs > 0 ? Math.max(1, Math.round((Date.now() - sessionStartMs) / 1000)) : 0;
+        const userAudioWavBase64 = toneAnalysisEnabled
+          ? buildWavBase64FromPcm16(userSpeechChunks)
+          : undefined;
 
         const reflection = await analyzeAndPersistSession({
           apiKey: getApiKey(),
@@ -511,6 +863,8 @@ wss.on('connection', (clientWs: WebSocket) => {
           personaId: currentPersonaId,
           scenarioId: currentScenarioId,
           transcript,
+          userAudioWavBase64,
+          durationSeconds,
         });
 
         sendToClient({
