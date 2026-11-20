@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   ArrowLeft,
   Clock,
@@ -77,6 +77,8 @@ export function FreeTalkView({
   onRequestGermanHelp,
   onToggleTranscript,
 }: FreeTalkViewProps) {
+  const [mobileHelperTab, setMobileHelperTab] = useState<'vocab' | 'transcript'>('vocab');
+
   const displayedVocab =
     liveVocabPopups.length > 0 ? liveVocabPopups : dueVocabulary.slice(0, 4);
 
@@ -94,7 +96,7 @@ export function FreeTalkView({
         </div>
       )}
 
-      <div className="hero-talk-card">
+      <div className={`hero-talk-card${callState !== 'idle' ? ' is-in-call' : ''}`}>
         {callState === 'idle' && (
           <div className="partner-pills" role="group" aria-label="Gesprächspartner wählen">
             {personas.map((p) => {
@@ -213,36 +215,62 @@ export function FreeTalkView({
             </div>
 
             {callState === 'in_call' && (
-              <div className="call-controls">
-                <button type="button" onClick={onToggleMute}>
-                  {isMuted ? (
-                    <>
-                      <MicOff size={16} aria-hidden="true" /> Stumm
-                    </>
-                  ) : (
-                    <>
-                      <Mic size={16} aria-hidden="true" /> Mikrofon an
-                    </>
-                  )}
-                </button>
+              <div className="call-controls-dock">
+                <div className="call-controls">
+                  <button type="button" className="call-ctrl-btn" onClick={onToggleMute}>
+                    {isMuted ? (
+                      <>
+                        <MicOff size={18} aria-hidden="true" />
+                        <span>Stumm</span>
+                      </>
+                    ) : (
+                      <>
+                        <Mic size={18} aria-hidden="true" />
+                        <span>Mikrofon</span>
+                      </>
+                    )}
+                  </button>
 
-                <button type="button" onClick={onRequestGermanHelp}>
-                  <HelpCircle size={16} aria-hidden="true" />
-                  Verstehe ich nicht (Deutsch)
-                </button>
+                  <button type="button" className="call-ctrl-btn" onClick={onRequestGermanHelp}>
+                    <HelpCircle size={18} aria-hidden="true" />
+                    <span>Deutsch</span>
+                  </button>
 
-                <button type="button" className="btn-danger" onClick={onEndCall}>
-                  <PhoneOff size={16} aria-hidden="true" />
-                  Beenden
-                </button>
+                  <button type="button" className="btn-danger call-ctrl-btn" onClick={onEndCall}>
+                    <PhoneOff size={18} aria-hidden="true" />
+                    <span>Beenden</span>
+                  </button>
+                </div>
               </div>
             )}
           </>
         )}
       </div>
 
+      <div className="mobile-helper-tabs" role="group" aria-label="Gesprächshilfen">
+        <button
+          type="button"
+          aria-pressed={mobileHelperTab === 'vocab'}
+          className={`mobile-helper-tab${mobileHelperTab === 'vocab' ? ' active' : ''}`}
+          onClick={() => setMobileHelperTab('vocab')}
+        >
+          Vokabeln ({displayedVocab.length})
+        </button>
+        <button
+          type="button"
+          aria-pressed={mobileHelperTab === 'transcript'}
+          className={`mobile-helper-tab${mobileHelperTab === 'transcript' ? ' active' : ''}`}
+          onClick={() => setMobileHelperTab('transcript')}
+        >
+          Transkript
+          {(transcriptTurns.length > 0 || Boolean(liveDraftAi || liveDraftUser)) && (
+            <span className="mobile-helper-dot" aria-hidden="true" />
+          )}
+        </button>
+      </div>
+
       <div className="two-col-grid">
-        <div className="panel-card">
+        <div className={`panel-card${mobileHelperTab !== 'vocab' ? ' is-mobile-hidden' : ''}`}>
           <div
             style={{
               display: 'flex',
@@ -285,7 +313,7 @@ export function FreeTalkView({
           </div>
         </div>
 
-        <div className="panel-card">
+        <div className={`panel-card${mobileHelperTab !== 'transcript' ? ' is-mobile-hidden' : ''}`}>
           <div
             style={{
               display: 'flex',

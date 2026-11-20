@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="bg-glow" cx="50%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#2a1618" />
+      <stop offset="100%" stop-color="#110d0e" />
+    </radialGradient>
+    <linearGradient id="seal-grad" x1="15%" y1="10%" x2="85%" y2="90%">
+      <stop offset="0%" stop-color="#e04f44" />
+      <stop offset="55%" stop-color="#c93b32" />
+      <stop offset="100%" stop-color="#9e261f" />
+    </linearGradient>
+    <linearGradient id="gold-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f3d285" />
+      <stop offset="100%" stop-color="#d49b38" />
+    </linearGradient>
+  </defs>
+
+  <!-- Opaque dark lacquer background (Apple HIG compliant) -->
+  <rect width="512" height="512" fill="url(#bg-glow)" />
+
+  <!-- Cinnabar Chinese Seal -->
+  <rect x="96" y="96" width="320" height="320" rx="68" fill="url(#seal-grad)" />
+  <rect x="112" y="112" width="288" height="288" rx="54" fill="none" stroke="url(#gold-grad)" stroke-width="5" stroke-opacity="0.85" />
+
+  <!-- Stylized Hanzi "说" (Speak) -->
+  <text
+    x="256"
+    y="296"
+    text-anchor="middle"
+    font-family="'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', sans-serif"
+    font-size="188"
+    font-weight="700"
+    fill="#f7f2ef"
+  >说</text>
+
+  <!-- Voice wave accent arcs at bottom of seal -->
+  <path d="M 206 352 Q 256 372 306 352" fill="none" stroke="url(#gold-grad)" stroke-width="8" stroke-linecap="round" />
+  <path d="M 228 372 Q 256 384 284 372" fill="none" stroke="url(#gold-grad)" stroke-width="6" stroke-linecap="round" stroke-opacity="0.75" />
+</svg>

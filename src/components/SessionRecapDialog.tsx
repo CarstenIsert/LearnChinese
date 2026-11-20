@@ -1,4 +1,5 @@
 import React, { useEffect, useId } from 'react';
+import { formatFactCategoryDe } from '../labels.ts';
 import { SessionReflection } from '../types.ts';
 import { formatDurationDe } from './HomeView.tsx';
 
@@ -103,7 +104,7 @@ export function SessionRecapDialog({ dialogRef, recap }: SessionRecapDialogProps
               <ul style={{ margin: 0, paddingInlineStart: '1.2rem' }}>
                 {recap.new_facts.map((nf, i) => (
                   <li key={i}>
-                    <span className="badge">{nf.category}</span> {nf.fact}
+                    <span className="badge">{formatFactCategoryDe(nf.category)}</span> {nf.fact}
                   </li>
                 ))}
               </ul>

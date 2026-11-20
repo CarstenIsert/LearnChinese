@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Pencil, Plus, Sparkles, Trash2 } from 'lucide-react';
+import { formatFactCategoryDe, SKILL_STATUS_META } from '../labels.ts';
 import { LearnerSkill, MemoryFact, Persona, PersonaEpisode } from '../types.ts';
 
 interface MemoryViewProps {
@@ -62,7 +63,7 @@ export function MemoryView({
                 <span className="persona-manage-emoji" aria-hidden="true">
                   {p.avatar_emoji}
                 </span>
-                <div>
+                <div className="persona-manage-text">
                   <div className="persona-manage-name">
                     <strong lang="zh-Hans">{p.name_hanzi}</strong>{' '}
                     <span className="muted-text">({p.name_pinyin})</span>
@@ -148,7 +149,7 @@ export function MemoryView({
               >
                 <div>
                   <span className="badge" style={{ marginInlineEnd: '0.45rem' }}>
-                    {f.category}
+                    {formatFactCategoryDe(f.category)}
                   </span>
                   <span>{f.fact}</span>
                 </div>
@@ -207,9 +208,11 @@ export function MemoryView({
                     fontSize: '0.86rem',
                   }}
                 >
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem' }}>
                     <strong>{s.skill_name}</strong>
-                    <span className="badge">{s.status}</span>
+                    <span className={(SKILL_STATUS_META[s.status] ?? SKILL_STATUS_META.practicing).badgeClass}>
+                      {(SKILL_STATUS_META[s.status] ?? SKILL_STATUS_META.practicing).label}
+                    </span>
                   </div>
                   <div style={{ color: 'var(--text-muted)', marginBlockStart: '0.15rem' }}>
                     {s.notes_de}

@@ -480,8 +480,39 @@ export default function App() {
     (s) => s.id === selectedScenarioId
   );
 
+  const isInActiveCall = activeTab === 'talk' && callState !== 'idle';
+  const navItems: Array<{
+    id: ActiveTab;
+    desktopLabel: string;
+    mobileLabel: string;
+    Icon: typeof Home;
+    badgeCount?: number;
+  }> = [
+    { id: 'home', desktopLabel: 'Startseite', mobileLabel: 'Start', Icon: Home },
+    { id: 'talk', desktopLabel: 'Free Talk', mobileLabel: 'Sprechen', Icon: PhoneCall },
+    {
+      id: 'vocab',
+      desktopLabel: `Vokabeln (${data.dueVocabulary.length} fällig)`,
+      mobileLabel: 'Vokabeln',
+      Icon: BookOpen,
+      badgeCount: data.dueVocabulary.length,
+    },
+    {
+      id: 'curriculum',
+      desktopLabel: `Themen (${data.scenarios.length})`,
+      mobileLabel: 'Themen',
+      Icon: GraduationCap,
+    },
+    {
+      id: 'memory',
+      desktopLabel: `Gedächtnis (${data.memoryFacts.length})`,
+      mobileLabel: 'Gedächtnis',
+      Icon: Brain,
+    },
+  ];
+
   return (
-    <div className="app-shell">
+    <div className={`app-shell${isInActiveCall ? ' is-in-call' : ''}`}>
       <header className="top-header">
         <div className="header-top-row">
           <button
@@ -516,51 +547,18 @@ export default function App() {
         </div>
 
         <nav className="tab-nav" aria-label="Hauptnavigation">
-          <button
-            type="button"
-            className="btn-tab"
-            aria-current={activeTab === 'home' ? 'page' : undefined}
-            onClick={() => setActiveTab('home')}
-          >
-            <Home size={15} aria-hidden="true" />
-            Startseite
-          </button>
-          <button
-            type="button"
-            className="btn-tab"
-            aria-current={activeTab === 'talk' ? 'page' : undefined}
-            onClick={() => setActiveTab('talk')}
-          >
-            <PhoneCall size={15} aria-hidden="true" />
-            Free Talk
-          </button>
-          <button
-            type="button"
-            className="btn-tab"
-            aria-current={activeTab === 'vocab' ? 'page' : undefined}
-            onClick={() => setActiveTab('vocab')}
-          >
-            <BookOpen size={15} aria-hidden="true" />
-            Vokabeln ({data.dueVocabulary.length} fällig)
-          </button>
-          <button
-            type="button"
-            className="btn-tab"
-            aria-current={activeTab === 'curriculum' ? 'page' : undefined}
-            onClick={() => setActiveTab('curriculum')}
-          >
-            <GraduationCap size={15} aria-hidden="true" />
-            Themen ({data.scenarios.length})
-          </button>
-          <button
-            type="button"
-            className="btn-tab"
-            aria-current={activeTab === 'memory' ? 'page' : undefined}
-            onClick={() => setActiveTab('memory')}
-          >
-            <Brain size={15} aria-hidden="true" />
-            Gedächtnis ({data.memoryFacts.length})
-          </button>
+          {navItems.map(({ id, desktopLabel, Icon }) => (
+            <button
+              key={id}
+              type="button"
+              className="btn-tab"
+              aria-current={activeTab === id ? 'page' : undefined}
+              onClick={() => setActiveTab(id)}
+            >
+              <Icon size={15} aria-hidden="true" />
+              {desktopLabel}
+            </button>
+          ))}
         </nav>
       </header>
 
@@ -742,6 +740,29 @@ export default function App() {
           await fetchBootstrap();
         }}
       />
+      {!isInActiveCall && (
+        <nav className="mobile-bottom-nav" aria-label="Mobile Navigation">
+          {navItems.map(({ id, mobileLabel, Icon, badgeCount }) => (
+            <button
+              key={id}
+              type="button"
+              className="mobile-nav-btn"
+              aria-current={activeTab === id ? 'page' : undefined}
+              onClick={() => setActiveTab(id)}
+            >
+              <span className="mobile-nav-icon-wrap">
+                <Icon size={20} aria-hidden="true" />
+                {badgeCount !== undefined && badgeCount > 0 && (
+                  <span className="mobile-nav-badge" aria-label={`${badgeCount} fällig`}>
+                    {badgeCount > 99 ? '99+' : badgeCount}
+                  </span>
+                )}
+              </span>
+              <span>{mobileLabel}</span>
+            </button>
+          ))}
+        </nav>
+      )}
     </div>
   );
 }
