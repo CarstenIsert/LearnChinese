@@ -5,20 +5,69 @@
  * - Exposes live volume level (0..1) for the voice visualizer
  */
 
+const WORKLET_PROCESSOR_NAME = 'pcm-capture-processor';
+
+const PCM_CAPTURE_PROCESSOR_CODE = `
+class PcmCaptureProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.bufferSize = 4096;
+    this.buffer = new Float32Array(this.bufferSize);
+    this.offset = 0;
+  }
+
+  process(inputs) {
+    const input = inputs[0]?.[0];
+    if (!input || input.length === 0) {
+      return true;
+    }
+
+    let inputOffset = 0;
+    while (inputOffset < input.length) {
+      const remaining = this.bufferSize - this.offset;
+      const toCopy = Math.min(remaining, input.length - inputOffset);
+      this.buffer.set(input.subarray(inputOffset, inputOffset + toCopy), this.offset);
+      this.offset += toCopy;
+      inputOffset += toCopy;
+
+      if (this.offset >= this.bufferSize) {
+        let sum = 0;
+        const int16 = new Int16Array(this.bufferSize);
+        for (let i = 0; i < this.bufferSize; i++) {
+          const sample = this.buffer[i];
+          sum += sample * sample;
+          const clamped = Math.max(-1, Math.min(1, sample));
+          int16[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+        }
+        const rms = Math.sqrt(sum / this.bufferSize);
+        this.port.postMessage({ pcmBuffer: int16.buffer, rms }, [int16.buffer]);
+        this.offset = 0;
+      }
+    }
+
+    return true;
+  }
+}
+
+registerProcessor('${WORKLET_PROCESSOR_NAME}', PcmCaptureProcessor);
+`;
+
 export class LiveAudioManager {
   private inputContext: AudioContext | null = null;
   private outputContext: AudioContext | null = null;
   private mediaStream: MediaStream | null = null;
-  private processorNode: ScriptProcessorNode | null = null;
+  private workletNode: AudioWorkletNode | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private nextPlayTime = 0;
   private activeSources: Set<AudioBufferSourceNode> = new Set();
   private isMuted = false;
+  private stopped = false;
 
   public onAudioInputChunk?: (base64Pcm16k: string) => void;
   public onVolumeChange?: (micLevel: number, aiSpeaking: boolean) => void;
 
   async startMicrophone(): Promise<void> {
+    this.stopped = false;
     this.mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         sampleRate: 16000,
@@ -29,39 +78,48 @@ export class LiveAudioManager {
       },
     });
 
+    if (this.stopped) {
+      this.mediaStream.getTracks().forEach((t) => t.stop());
+      this.mediaStream = null;
+      return;
+    }
+
     this.inputContext = new AudioContext({ sampleRate: 16000 });
     this.outputContext = new AudioContext({ sampleRate: 24000 });
 
+    if (this.inputContext.state === 'suspended') {
+      await this.inputContext.resume();
+    }
+
+    const blob = new Blob([PCM_CAPTURE_PROCESSOR_CODE], { type: 'application/javascript' });
+    const moduleUrl = URL.createObjectURL(blob);
+    try {
+      await this.inputContext.audioWorklet.addModule(moduleUrl);
+    } finally {
+      URL.revokeObjectURL(moduleUrl);
+    }
+
+    if (this.stopped || !this.inputContext || !this.mediaStream) {
+      return;
+    }
+
     this.sourceNode = this.inputContext.createMediaStreamSource(this.mediaStream);
-    this.processorNode = this.inputContext.createScriptProcessor(4096, 1, 1);
+    this.workletNode = new AudioWorkletNode(this.inputContext, WORKLET_PROCESSOR_NAME);
 
-    this.processorNode.onaudioprocess = (event) => {
-      const float32Data = event.inputBuffer.getChannelData(0);
-
-      // Compute RMS volume for visualizer
-      let sum = 0;
-      for (let i = 0; i < float32Data.length; i++) {
-        sum += float32Data[i] * float32Data[i];
-      }
-      const rms = Math.sqrt(sum / float32Data.length);
+    this.workletNode.port.onmessage = (
+      event: MessageEvent<{ pcmBuffer: ArrayBuffer; rms: number }>
+    ) => {
+      const { pcmBuffer, rms } = event.data;
       const normalizedVolume = Math.min(1, rms * 5);
       this.onVolumeChange?.(this.isMuted ? 0 : normalizedVolume, this.activeSources.size > 0);
 
       if (this.isMuted) return;
 
-      // Convert Float32 (-1..1) to Int16 PCM
-      const int16Buffer = new Int16Array(float32Data.length);
-      for (let i = 0; i < float32Data.length; i++) {
-        const clamped = Math.max(-1, Math.min(1, float32Data[i]));
-        int16Buffer[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
-      }
-
-      const base64 = arrayBufferToBase64(int16Buffer.buffer);
+      const base64 = arrayBufferToBase64(pcmBuffer);
       this.onAudioInputChunk?.(base64);
     };
 
-    this.sourceNode.connect(this.processorNode);
-    this.processorNode.connect(this.inputContext.destination);
+    this.sourceNode.connect(this.workletNode);
   }
 
   setMuted(muted: boolean) {
@@ -126,10 +184,12 @@ export class LiveAudioManager {
   }
 
   stopAll() {
+    this.stopped = true;
     this.interruptPlayback();
-    if (this.processorNode) {
-      this.processorNode.disconnect();
-      this.processorNode = null;
+    if (this.workletNode) {
+      this.workletNode.port.onmessage = null;
+      this.workletNode.disconnect();
+      this.workletNode = null;
     }
     if (this.sourceNode) {
       this.sourceNode.disconnect();

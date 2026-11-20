@@ -192,6 +192,7 @@ export function initDatabase() {
   }
 
   migrateToMultiUserSchema();
+  fixPersonaForeignKeys();
 
   if (!hasColumn('learner_profile', 'onboarding_completed')) {
     db.exec(`ALTER TABLE learner_profile ADD COLUMN onboarding_completed INTEGER NOT NULL DEFAULT 0`);
@@ -373,6 +374,83 @@ function migrateToMultiUserSchema() {
       }
     });
     runMigration();
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
+}
+
+function hasSingleColumnPersonaFk(table: string): boolean {
+  const fks = db.pragma(`foreign_key_list(${table})`) as Array<{
+    table: string;
+    from: string;
+  }>;
+  const personaFks = fks.filter((fk) => fk.table === 'personas');
+  return personaFks.length === 1 && personaFks[0].from === 'persona_id';
+}
+
+function fixPersonaForeignKeys() {
+  const fixEpisodes = hasSingleColumnPersonaFk('persona_episodes');
+  const fixSessions = hasSingleColumnPersonaFk('sessions');
+  if (!fixEpisodes && !fixSessions) return;
+
+  db.pragma('foreign_keys = OFF');
+  try {
+    const runFix = db.transaction(() => {
+      if (fixEpisodes) {
+        db.exec(`
+          CREATE TABLE persona_episodes_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL DEFAULT 1,
+            persona_id TEXT NOT NULL,
+            session_id INTEGER,
+            summary TEXT NOT NULL,
+            next_hook TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id, persona_id) REFERENCES personas(user_id, id)
+          );
+          INSERT INTO persona_episodes_new (
+            id, user_id, persona_id, session_id, summary, next_hook, created_at
+          )
+          SELECT
+            id, user_id, persona_id, session_id, summary, next_hook, created_at
+          FROM persona_episodes;
+          DROP TABLE persona_episodes;
+          ALTER TABLE persona_episodes_new RENAME TO persona_episodes;
+        `);
+      }
+
+      if (fixSessions) {
+        db.exec(`
+          CREATE TABLE sessions_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL DEFAULT 1,
+            persona_id TEXT NOT NULL,
+            scenario_id TEXT,
+            started_at TEXT NOT NULL DEFAULT (datetime('now')),
+            ended_at TEXT,
+            duration_seconds INTEGER NOT NULL DEFAULT 0,
+            transcript_json TEXT NOT NULL DEFAULT '[]',
+            summary_de TEXT,
+            coaching_notes_json TEXT,
+            extracted_memories_json TEXT,
+            FOREIGN KEY (user_id, persona_id) REFERENCES personas(user_id, id)
+          );
+          INSERT INTO sessions_new (
+            id, user_id, persona_id, scenario_id, started_at, ended_at,
+            duration_seconds, transcript_json, summary_de, coaching_notes_json,
+            extracted_memories_json
+          )
+          SELECT
+            id, user_id, persona_id, scenario_id, started_at, ended_at,
+            COALESCE(duration_seconds, 0), COALESCE(transcript_json, '[]'), summary_de,
+            coaching_notes_json, extracted_memories_json
+          FROM sessions;
+          DROP TABLE sessions;
+          ALTER TABLE sessions_new RENAME TO sessions;
+        `);
+      }
+    });
+    runFix();
   } finally {
     db.pragma('foreign_keys = ON');
   }
