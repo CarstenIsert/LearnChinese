@@ -15,7 +15,8 @@ import {
 } from './curriculum.ts';
 import {
   addMemoryFact,
-  db,
+  createSessionRecord,
+  DEFAULT_USER_ID,
   deleteMemoryFact,
   getAllMemoryFacts,
   getAllPersonas,
@@ -27,11 +28,19 @@ import {
   getLearningStats,
   getPersonaById,
   getRecentFamilyEpisodesAcrossAll,
+  getRecentSessions,
   initDatabase,
   recordVocabularyReview,
   saveOrUpdateVocabulary,
   updateSentenceComplexityPreference,
 } from './db.ts';
+import {
+  AuthUser,
+  createAuthRouter,
+  getAuthenticatedUserFromRequest,
+  isAuthEnforced,
+  requireAuth,
+} from './auth.ts';
 import { buildSystemPrompt, LIVE_TOOLS_DECLARATIONS } from './prompts.ts';
 
 dotenv.config({ path: '.env.local' });
@@ -40,6 +49,14 @@ dotenv.config();
 initDatabase();
 
 const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
 app.use(express.json({ limit: '5mb' }));
 
 const PORT = Number(process.env.PORT || 6889);
@@ -177,30 +194,25 @@ app.get('/api/status', (_req, res) => {
   });
 });
 
-app.get('/api/bootstrap', async (_req, res) => {
-  await maybeAutoExpandCurriculum().catch(() => null);
-  const profile = getLearnerProfile();
-  const personas = getAllPersonas();
-  const scenarios = getAllScenarios();
+app.use('/api/auth', createAuthRouter());
+app.use('/api', requireAuth);
+
+app.get('/api/bootstrap', async (req, res) => {
+  const userId = req.user?.id ?? DEFAULT_USER_ID;
+  await maybeAutoExpandCurriculum(undefined, userId).catch(() => null);
+  const profile = getLearnerProfile(userId);
+  const personas = getAllPersonas(userId);
+  const scenarios = getAllScenarios(userId);
   const existingIds = new Set(scenarios.map((s) => s.id));
   const remainingCurated = HSK_CURRICULUM_PROGRESSION.filter((c) => !existingIds.has(c.id)).length;
-  const memoryFacts = getAllMemoryFacts();
-  const recentEpisodes = getRecentFamilyEpisodesAcrossAll(8);
-  const skills = getLearnerSkills();
-  const dueVocabulary = getDueVocabulary(8);
-  const allVocabulary = getAllVocabulary();
-  const recentSessions = db
-    .prepare(`
-      SELECT s.id, s.persona_id, s.scenario_id, s.started_at, s.ended_at, s.duration_seconds, s.summary_de,
-             p.name_hanzi as persona_name, p.avatar_emoji as persona_emoji
-      FROM sessions s
-      JOIN personas p ON p.id = s.persona_id
-      WHERE s.ended_at IS NOT NULL
-      ORDER BY s.id DESC LIMIT 10
-    `)
-    .all();
+  const memoryFacts = getAllMemoryFacts(userId);
+  const recentEpisodes = getRecentFamilyEpisodesAcrossAll(8, userId);
+  const skills = getLearnerSkills(userId);
+  const dueVocabulary = getDueVocabulary(8, userId);
+  const allVocabulary = getAllVocabulary(userId);
+  const recentSessions = getRecentSessions(userId, 10);
 
-  const stats = getLearningStats();
+  const stats = getLearningStats(userId);
 
   res.json({
     hasApiKey: hasValidApiKey(),
@@ -220,6 +232,7 @@ app.get('/api/bootstrap', async (_req, res) => {
 });
 
 app.post('/api/profile/complexity', (req, res) => {
+  const userId = req.user?.id ?? DEFAULT_USER_ID;
   const { preference } = req.body as { preference?: string };
   const valid =
     preference === 'short' ||
@@ -230,11 +243,12 @@ app.post('/api/profile/complexity', (req, res) => {
     res.status(400).json({ error: 'Invalid complexity preference' });
     return;
   }
-  updateSentenceComplexityPreference(preference);
-  res.json({ ok: true, stats: getLearningStats(), profile: getLearnerProfile() });
+  updateSentenceComplexityPreference(preference, userId);
+  res.json({ ok: true, stats: getLearningStats(userId), profile: getLearnerProfile(userId) });
 });
 
 app.post('/api/topics/suggest', async (req, res) => {
+  const userId = req.user?.id ?? DEFAULT_USER_ID;
   const { personaId, recentTopics } = (req.body || {}) as {
     personaId?: string;
     recentTopics?: string[];
@@ -243,20 +257,23 @@ app.post('/api/topics/suggest', async (req, res) => {
     apiKey: getApiKey(),
     personaId,
     recentTopics: Array.isArray(recentTopics) ? recentTopics.slice(0, 10) : [],
+    userId,
   });
   res.json(result);
 });
 
 app.post('/api/curriculum/expand', async (req, res) => {
+  const userId = req.user?.id ?? DEFAULT_USER_ID;
   const { targetLevel } = (req.body || {}) as { targetLevel?: 'HSK 3' | 'HSK 4' };
   const validLevel = targetLevel === 'HSK 3' || targetLevel === 'HSK 4' ? targetLevel : undefined;
   const result = await expandCurriculumNext({
     apiKey: getApiKey(),
     targetLevel: validLevel,
+    userId,
   });
   res.json({
     ...result,
-    scenarios: getAllScenarios(),
+    scenarios: getAllScenarios(userId),
   });
 });
 
@@ -374,50 +391,65 @@ Return structured JSON with:
 });
 
 app.post('/api/memories', (req, res) => {
+  const userId = req.user?.id ?? DEFAULT_USER_ID;
   const { category, fact } = req.body as { category?: string; fact?: string };
   if (!fact || !fact.trim()) {
     res.status(400).json({ error: 'Fact is required' });
     return;
   }
-  const id = addMemoryFact(category || 'general', fact.trim(), 'manual-user');
-  res.json({ id, facts: getAllMemoryFacts() });
+  const id = addMemoryFact(category || 'general', fact.trim(), 'manual-user', userId);
+  res.json({ id, facts: getAllMemoryFacts(userId) });
 });
 
 app.delete('/api/memories/:id', (req, res) => {
+  const userId = req.user?.id ?? DEFAULT_USER_ID;
   const id = Number(req.params.id);
-  deleteMemoryFact(id);
-  res.json({ ok: true, facts: getAllMemoryFacts() });
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: 'Invalid memory ID' });
+    return;
+  }
+  deleteMemoryFact(id, userId);
+  res.json({ ok: true, facts: getAllMemoryFacts(userId) });
 });
 
 app.post('/api/vocabulary', (req, res) => {
+  const userId = req.user?.id ?? DEFAULT_USER_ID;
   const { simplified_hanzi, pinyin, german, taiwan_note, example_hanzi, example_pinyin, example_de } =
     req.body;
   if (!simplified_hanzi || !pinyin || !german) {
     res.status(400).json({ error: 'Hanzi, Pinyin, and German are required' });
     return;
   }
-  const saved = saveOrUpdateVocabulary({
-    simplified_hanzi,
-    pinyin,
-    german,
-    taiwan_note,
-    example_hanzi,
-    example_pinyin,
-    example_de,
+  const saved = saveOrUpdateVocabulary(
+    {
+      simplified_hanzi,
+      pinyin,
+      german,
+      taiwan_note,
+      example_hanzi,
+      example_pinyin,
+      example_de,
+    },
+    userId
+  );
+  res.json({
+    word: saved,
+    allVocabulary: getAllVocabulary(userId),
+    dueVocabulary: getDueVocabulary(8, userId),
   });
-  res.json({ word: saved, allVocabulary: getAllVocabulary(), dueVocabulary: getDueVocabulary(8) });
 });
 
 app.post('/api/vocabulary/review', (req, res) => {
+  const userId = req.user?.id ?? DEFAULT_USER_ID;
   const { simplified_hanzi, outcome } = req.body as {
     simplified_hanzi: string;
     outcome: 'used_actively' | 'recognized' | 'forgotten';
   };
-  const updated = recordVocabularyReview(simplified_hanzi, outcome);
+  const updated = recordVocabularyReview(simplified_hanzi, outcome, userId);
   res.json({
     word: updated,
-    allVocabulary: getAllVocabulary(),
-    dueVocabulary: getDueVocabulary(8),
+    allVocabulary: getAllVocabulary(userId),
+    dueVocabulary: getDueVocabulary(8, userId),
   });
 });
 
@@ -476,9 +508,42 @@ function buildWavBase64FromPcm16(chunks: Buffer[], sampleRate = 16000): string |
 
 // --- WebSocket Server for Gemini Multimodal Live API ---
 
-const wss = new WebSocketServer({ server, path: '/ws/live' });
+const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 
-wss.on('connection', (clientWs: WebSocket) => {
+function isSameOriginUpgrade(req: http.IncomingMessage): boolean {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  const host = req.headers.host;
+  if (!host) return false;
+  try {
+    return new URL(origin).host === host;
+  } catch {
+    return false;
+  }
+}
+
+server.on('upgrade', (req, socket, head) => {
+  const pathname = (req.url || '').split('?')[0];
+  if (pathname !== '/ws/live' || !isSameOriginUpgrade(req)) {
+    socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+
+  const user = getAuthenticatedUserFromRequest(req);
+  if (!user && isAuthEnforced()) {
+    socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    wss.emit('connection', ws, req, user);
+  });
+});
+
+wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: AuthUser | null) => {
+  const userId = user?.id ?? DEFAULT_USER_ID;
   let geminiSession: any = null;
   let currentSessionDbId: number | null = null;
   let currentPersonaId = 'coach-lin';
@@ -532,18 +597,20 @@ wss.on('connection', (clientWs: WebSocket) => {
           return;
         }
 
-        const fallbackPersona = getAllPersonas()[0];
+        const fallbackPersona = getAllPersonas(userId)[0];
         currentPersonaId = msg.personaId || fallbackPersona.id;
         currentScenarioId = msg.scenarioId || undefined;
         const customTopic = msg.topic ? String(msg.topic) : undefined;
-        const persona = getPersonaById(currentPersonaId) ?? fallbackPersona;
-        const systemInstruction = buildSystemPrompt(currentPersonaId, currentScenarioId, customTopic);
+        const persona = getPersonaById(currentPersonaId, userId) ?? fallbackPersona;
+        const systemInstruction = buildSystemPrompt(
+          currentPersonaId,
+          currentScenarioId,
+          customTopic,
+          userId
+        );
 
         // Create session row in SQLite
-        const info = db
-          .prepare('INSERT INTO sessions (persona_id, scenario_id) VALUES (?, ?)')
-          .run(currentPersonaId, currentScenarioId ?? null);
-        currentSessionDbId = Number(info.lastInsertRowid);
+        currentSessionDbId = createSessionRecord(currentPersonaId, currentScenarioId ?? null, userId);
         sessionStartMs = Date.now();
         toneAnalysisEnabled = Boolean(msg.enableToneAnalysis);
         userSpeechChunks.length = 0;
@@ -671,15 +738,18 @@ wss.on('connection', (clientWs: WebSocket) => {
                   const args = (call.args || {}) as Record<string, any>;
 
                   if (call.name === 'save_vocab') {
-                    const savedWord = saveOrUpdateVocabulary({
-                      simplified_hanzi: String(args.simplified_hanzi || ''),
-                      pinyin: String(args.pinyin || ''),
-                      german: String(args.german || ''),
-                      taiwan_note: args.taiwan_note ? String(args.taiwan_note) : undefined,
-                      example_hanzi: args.example_hanzi ? String(args.example_hanzi) : undefined,
-                      example_pinyin: args.example_pinyin ? String(args.example_pinyin) : undefined,
-                      example_de: args.example_de ? String(args.example_de) : undefined,
-                    });
+                    const savedWord = saveOrUpdateVocabulary(
+                      {
+                        simplified_hanzi: String(args.simplified_hanzi || ''),
+                        pinyin: String(args.pinyin || ''),
+                        german: String(args.german || ''),
+                        taiwan_note: args.taiwan_note ? String(args.taiwan_note) : undefined,
+                        example_hanzi: args.example_hanzi ? String(args.example_hanzi) : undefined,
+                        example_pinyin: args.example_pinyin ? String(args.example_pinyin) : undefined,
+                        example_de: args.example_de ? String(args.example_de) : undefined,
+                      },
+                      userId
+                    );
 
                     sendToClient({
                       type: 'vocab_card_popup',
@@ -699,7 +769,8 @@ wss.on('connection', (clientWs: WebSocket) => {
                         : 'recognized';
                     const updated = recordVocabularyReview(
                       String(args.simplified_hanzi || ''),
-                      outcome
+                      outcome,
+                      userId
                     );
 
                     sendToClient({
@@ -717,7 +788,7 @@ wss.on('connection', (clientWs: WebSocket) => {
                   } else if (call.name === 'remember_fact') {
                     const category = String(args.category || 'general');
                     const fact = String(args.fact || '');
-                    const factId = addMemoryFact(category, fact, currentPersonaId);
+                    const factId = addMemoryFact(category, fact, currentPersonaId, userId);
 
                     sendToClient({
                       type: 'memory_saved_toast',
@@ -775,7 +846,7 @@ wss.on('connection', (clientWs: WebSocket) => {
                     role: 'user',
                     parts: [
                       {
-                        text: `(System: Das Gespräch hat begonnen. Begrüße ${getLearnerProfile().name} herzlich auf Chinesisch in deiner Rolle als ${persona.name_hanzi}. ${openingTopicNote})`,
+                        text: `(System: Das Gespräch hat begonnen. Begrüße ${getLearnerProfile(userId).name} herzlich auf Chinesisch in deiner Rolle als ${persona.name_hanzi}. ${openingTopicNote})`,
                       },
                     ],
                   },
@@ -865,6 +936,7 @@ wss.on('connection', (clientWs: WebSocket) => {
           transcript,
           userAudioWavBase64,
           durationSeconds,
+          userId,
         });
 
         sendToClient({

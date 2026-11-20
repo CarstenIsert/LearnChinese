@@ -1,6 +1,7 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import {
   db,
+  DEFAULT_USER_ID,
   getAllMemoryFacts,
   getAllPersonas,
   getAllScenarios,
@@ -188,8 +189,8 @@ export const HSK_CURRICULUM_PROGRESSION: HskCurriculumTemplate[] = [
   },
 ];
 
-function resolvePersonaIdForRole(role: PersonaRoleHint): string {
-  const personas = getAllPersonas();
+function resolvePersonaIdForRole(role: PersonaRoleHint, userId = DEFAULT_USER_ID): string {
+  const personas = getAllPersonas(userId);
   if (personas.length === 0) {
     throw new Error('No personas available in database.');
   }
@@ -274,24 +275,28 @@ function sanitizeRecentTopics(topics: string[]): string[] {
     .slice(0, 6);
 }
 
-function insertScenarioRow(row: {
-  id: string;
-  stage_number: number;
-  stage_title_de: string;
-  title_de: string;
-  title_hanzi: string;
-  description_de: string;
-  persona_id: string;
-  target_grammar: string;
-  suggested_vocab: string;
-  hsk_level: 'HSK 3' | 'HSK 4';
-}) {
+function insertScenarioRow(
+  row: {
+    id: string;
+    stage_number: number;
+    stage_title_de: string;
+    title_de: string;
+    title_hanzi: string;
+    description_de: string;
+    persona_id: string;
+    target_grammar: string;
+    suggested_vocab: string;
+    hsk_level: 'HSK 3' | 'HSK 4';
+  },
+  userId = DEFAULT_USER_ID
+) {
   db.prepare(`
     INSERT OR IGNORE INTO curriculum_scenarios (
-      id, stage_number, stage_title_de, title_de, title_hanzi,
+      user_id, id, stage_number, stage_title_de, title_de, title_hanzi,
       description_de, persona_id, target_grammar, suggested_vocab, hsk_level
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
+    userId,
     row.id,
     row.stage_number,
     row.stage_title_de,
@@ -303,19 +308,20 @@ function insertScenarioRow(row: {
     row.suggested_vocab,
     row.hsk_level
   );
-  return getScenarioById(row.id) ?? null;
+  return getScenarioById(row.id, userId) ?? null;
 }
 
 export async function suggestCurrentTopic(params: {
   apiKey?: string;
   personaId?: string;
   recentTopics?: string[];
+  userId?: number;
 }): Promise<{ topic: string; source: 'ai' | 'seasonal' }> {
-  const { apiKey, personaId } = params;
+  const { apiKey, personaId, userId = DEFAULT_USER_ID } = params;
   const recentTopics = sanitizeRecentTopics(params.recentTopics ?? []);
   const seasonal = getSeasonalContext();
-  const persona = personaId ? getPersonaById(personaId) : getAllPersonas()[0];
-  const profile = getLearnerProfile();
+  const persona = personaId ? getPersonaById(personaId, userId) : getAllPersonas(userId)[0];
+  const profile = getLearnerProfile(userId);
 
   const fallbackPool = [
     ...seasonal.seasonalTopics,
@@ -336,7 +342,7 @@ export async function suggestCurrentTopic(params: {
 
   try {
     const ai = new GoogleGenAI({ apiKey });
-    const facts = getAllMemoryFacts().slice(0, 6);
+    const facts = getAllMemoryFacts(userId).slice(0, 6);
     const factsSummary = facts.map((f) => `- ${f.fact}`).join('\n');
 
     const prompt = `Du schlägst ein einzelnes, frisches, aktuelles Gesprächsthema auf Deutsch für ein Mandarin-Übungsgespräch (Niveau ${profile.level}, HSK 3–4) vor.
@@ -376,12 +382,14 @@ Anforderungen:
 export async function expandCurriculumNext(params: {
   apiKey?: string;
   targetLevel?: 'HSK 3' | 'HSK 4';
+  userId?: number;
 }): Promise<{
   added: ReturnType<typeof getScenarioById> | null;
   source: 'curated' | 'ai' | 'none';
   remainingCurated: number;
 }> {
-  const existing = getAllScenarios();
+  const userId = params.userId ?? DEFAULT_USER_ID;
+  const existing = getAllScenarios(userId);
   const existingIds = new Set(existing.map((s) => s.id));
 
   const unaddedCurated = HSK_CURRICULUM_PROGRESSION.filter((item) => !existingIds.has(item.id));
@@ -390,19 +398,22 @@ export async function expandCurriculumNext(params: {
     : unaddedCurated[0];
 
   if (nextCurated) {
-    const personaId = resolvePersonaIdForRole(nextCurated.preferred_role);
-    const inserted = insertScenarioRow({
-      id: nextCurated.id,
-      stage_number: nextCurated.stage_number,
-      stage_title_de: nextCurated.stage_title_de,
-      title_de: nextCurated.title_de,
-      title_hanzi: nextCurated.title_hanzi,
-      description_de: nextCurated.description_de,
-      persona_id: personaId,
-      target_grammar: nextCurated.target_grammar,
-      suggested_vocab: nextCurated.suggested_vocab,
-      hsk_level: nextCurated.hsk_level,
-    });
+    const personaId = resolvePersonaIdForRole(nextCurated.preferred_role, userId);
+    const inserted = insertScenarioRow(
+      {
+        id: nextCurated.id,
+        stage_number: nextCurated.stage_number,
+        stage_title_de: nextCurated.stage_title_de,
+        title_de: nextCurated.title_de,
+        title_hanzi: nextCurated.title_hanzi,
+        description_de: nextCurated.description_de,
+        persona_id: personaId,
+        target_grammar: nextCurated.target_grammar,
+        suggested_vocab: nextCurated.suggested_vocab,
+        hsk_level: nextCurated.hsk_level,
+      },
+      userId
+    );
     return {
       added: inserted,
       source: 'curated',
@@ -417,8 +428,8 @@ export async function expandCurriculumNext(params: {
 
   try {
     const ai = new GoogleGenAI({ apiKey: params.apiKey });
-    const profile = getLearnerProfile();
-    const skills = getLearnerSkills().slice(0, 6);
+    const profile = getLearnerProfile(userId);
+    const skills = getLearnerSkills(userId).slice(0, 6);
     const maxStage = existing.reduce((max, s) => Math.max(max, s.stage_number), 5);
     const nextStage = maxStage + 1;
     const desiredLevel: 'HSK 3' | 'HSK 4' =
@@ -485,7 +496,7 @@ Requirements:
         parsed.preferred_role === 'younger'
           ? parsed.preferred_role
           : 'tutor';
-      const personaId = resolvePersonaIdForRole(role);
+      const personaId = resolvePersonaIdForRole(role, userId);
       const slug = (parsed.topic_slug || 'custom')
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '-')
@@ -494,18 +505,21 @@ Requirements:
       const id = `${desiredLevel.toLowerCase().replace(/\s+/g, '')}-${slug || 'topic'}-${Date.now().toString(36)}`;
       const stageTitleDe = `Stufe ${nextStage} · ${desiredLevel}: Erweiterung`;
 
-      const inserted = insertScenarioRow({
-        id,
-        stage_number: nextStage,
-        stage_title_de: stageTitleDe,
-        title_de: parsed.title_de,
-        title_hanzi: parsed.title_hanzi,
-        description_de: parsed.description_de,
-        persona_id: personaId,
-        target_grammar: parsed.target_grammar || '',
-        suggested_vocab: parsed.suggested_vocab || '',
-        hsk_level: desiredLevel,
-      });
+      const inserted = insertScenarioRow(
+        {
+          id,
+          stage_number: nextStage,
+          stage_title_de: stageTitleDe,
+          title_de: parsed.title_de,
+          title_hanzi: parsed.title_hanzi,
+          description_de: parsed.description_de,
+          persona_id: personaId,
+          target_grammar: parsed.target_grammar || '',
+          suggested_vocab: parsed.suggested_vocab || '',
+          hsk_level: desiredLevel,
+        },
+        userId
+      );
       return { added: inserted, source: 'ai', remainingCurated: unaddedCurated.length };
     }
   } catch (err) {
@@ -518,8 +532,8 @@ Requirements:
 /**
  * Automatically unlocks the next HSK 3/4 scenario when fewer than 2 unpracticed scenarios remain.
  */
-export async function maybeAutoExpandCurriculum(apiKey?: string) {
-  const scenarios = getAllScenarios();
+export async function maybeAutoExpandCurriculum(apiKey?: string, userId = DEFAULT_USER_ID) {
+  const scenarios = getAllScenarios(userId);
   if (scenarios.length >= 24) return null;
 
   const unpracticedCount = scenarios.filter((s) => s.times_practiced === 0).length;
@@ -527,7 +541,7 @@ export async function maybeAutoExpandCurriculum(apiKey?: string) {
 
   // Gradually expand once the learner has practiced some scenarios and < 2 unpracticed remain
   if (practicedCount > 0 && unpracticedCount < 2) {
-    const res = await expandCurriculumNext({ apiKey });
+    const res = await expandCurriculumNext({ apiKey, userId });
     return res.added;
   }
   return null;

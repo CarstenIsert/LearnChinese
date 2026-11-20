@@ -172,3 +172,27 @@ export interface SessionReflection {
   }>;
   scenario_mastery_delta: number;
 }
+
+export interface AuthUser {
+  id: number;
+  email: string;
+  displayName: string;
+  role: 'admin' | 'user';
+  createdAt: string;
+}
+
+export interface AuthStatusResponse {
+  authenticated: boolean;
+  user: AuthUser | null;
+  authEnforced: boolean;
+  requiresBootstrapAdmin: boolean;
+}
+
+export interface InviteCode {
+  code: string;
+  created_by_user_id: number;
+  used_by_user_id: number | null;
+  expires_at: string | null;
+  used_at: string | null;
+  created_at: string;
+}

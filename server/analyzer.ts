@@ -3,6 +3,7 @@ import { maybeAutoExpandCurriculum } from './curriculum.ts';
 import {
   addMemoryFact,
   db,
+  DEFAULT_USER_ID,
   getAllMemoryFacts,
   getLearnerProfile,
   getPersonaById,
@@ -66,11 +67,20 @@ export async function analyzeAndPersistSession(params: {
   transcript: TranscriptEntry[];
   userAudioWavBase64?: string;
   durationSeconds?: number;
+  userId?: number;
 }): Promise<SessionReflectionResult> {
-  const { apiKey, sessionId, personaId, scenarioId, transcript, userAudioWavBase64, durationSeconds } =
-    params;
-  const persona = getPersonaById(personaId);
-  const existingFacts = getAllMemoryFacts();
+  const {
+    apiKey,
+    sessionId,
+    personaId,
+    scenarioId,
+    transcript,
+    userAudioWavBase64,
+    durationSeconds,
+    userId = DEFAULT_USER_ID,
+  } = params;
+  const persona = getPersonaById(personaId, userId);
+  const existingFacts = getAllMemoryFacts(userId);
 
   const fallbackResult: SessionReflectionResult = {
     summary_de:
@@ -89,13 +99,21 @@ export async function analyzeAndPersistSession(params: {
   };
 
   if (transcript.length === 0 || !apiKey || apiKey === 'your_gemini_api_key_here') {
-    persistReflectionToDb(sessionId, personaId, scenarioId, transcript, fallbackResult, durationSeconds);
+    persistReflectionToDb(
+      sessionId,
+      personaId,
+      scenarioId,
+      transcript,
+      fallbackResult,
+      durationSeconds,
+      userId
+    );
     return fallbackResult;
   }
 
   try {
     const ai = new GoogleGenAI({ apiKey });
-    const profile = getLearnerProfile();
+    const profile = getLearnerProfile(userId);
     const learnerName = profile?.name || 'Learner';
     const formattedTranscript = transcript
       .map(
@@ -244,9 +262,10 @@ Return a structured JSON analysis that:
       scenarioId,
       transcript,
       parsed,
-      durationSeconds
+      durationSeconds,
+      userId
     );
-    await maybeAutoExpandCurriculum(apiKey).catch((err) => {
+    await maybeAutoExpandCurriculum(apiKey, userId).catch((err) => {
       console.warn('Auto curriculum expansion skipped:', err);
     });
     return savedResult;
@@ -258,7 +277,8 @@ Return a structured JSON analysis that:
       scenarioId,
       transcript,
       fallbackResult,
-      durationSeconds
+      durationSeconds,
+      userId
     );
     return fallbackResult;
   }
@@ -270,13 +290,14 @@ function persistReflectionToDb(
   scenarioId: string | undefined,
   transcript: TranscriptEntry[],
   result: SessionReflectionResult,
-  durationSeconds?: number
+  durationSeconds?: number,
+  userId = DEFAULT_USER_ID
 ): SessionReflectionResult {
   // 1. Save new facts
   const savedFacts: SessionReflectionResult['new_facts'] = [];
   for (const f of result.new_facts || []) {
     if (f.fact && f.fact.trim()) {
-      const id = addMemoryFact(f.category || 'general', f.fact.trim(), personaId);
+      const id = addMemoryFact(f.category || 'general', f.fact.trim(), personaId, userId);
       savedFacts.push({ id, category: f.category || 'general', fact: f.fact.trim() });
     }
   }
@@ -285,9 +306,10 @@ function persistReflectionToDb(
   // 2. Save episodic memory for this relative
   if (result.episode_summary_for_persona) {
     db.prepare(`
-      INSERT INTO persona_episodes (persona_id, session_id, summary, next_hook)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO persona_episodes (user_id, persona_id, session_id, summary, next_hook)
+      VALUES (?, ?, ?, ?, ?)
     `).run(
+      userId,
       personaId,
       sessionId,
       result.episode_summary_for_persona,
@@ -299,14 +321,21 @@ function persistReflectionToDb(
   for (const s of result.skill_updates || []) {
     const validStatus =
       s.status === 'struggling' || s.status === 'comfortable' ? s.status : 'practicing';
-    upsertLearnerSkill(s.skill_name, s.category || 'grammar', validStatus, s.notes_de, s.last_example);
+    upsertLearnerSkill(
+      s.skill_name,
+      s.category || 'grammar',
+      validStatus,
+      s.notes_de,
+      s.last_example,
+      userId
+    );
   }
 
   // 4. Save extracted vocabulary
   for (const v of result.vocab_extracted || []) {
     if (v.simplified_hanzi && v.pinyin && v.german) {
-      saveOrUpdateVocabulary(v);
-      recordVocabularyReview(v.simplified_hanzi, 'recognized');
+      saveOrUpdateVocabulary(v, userId);
+      recordVocabularyReview(v.simplified_hanzi, 'recognized', userId);
     }
   }
 
@@ -318,8 +347,8 @@ function persistReflectionToDb(
       SET mastery_score = MIN(5, mastery_score + ?),
           times_practiced = times_practiced + 1,
           last_practiced_at = datetime('now')
-      WHERE id = ?
-    `).run(delta, scenarioId);
+      WHERE user_id = ? AND id = ?
+    `).run(delta, userId, scenarioId);
   }
 
   // 6. Update session record
@@ -331,14 +360,15 @@ function persistReflectionToDb(
         summary_de = ?,
         coaching_notes_json = ?,
         extracted_memories_json = ?
-    WHERE id = ?
+    WHERE id = ? AND user_id = ?
   `).run(
     durationSeconds ?? null,
     JSON.stringify(transcript),
     result.summary_de,
     JSON.stringify(result.coaching_tips || []),
     JSON.stringify(result.new_facts || []),
-    sessionId
+    sessionId,
+    userId
   );
 
   return result;

@@ -70,13 +70,18 @@ dialog::backdrop {
 /* Minimal Header & Navigation */
 .top-header {
   display: flex;
-  flex-wrap: wrap;
-  align-items: safe center;
-  justify-content: space-between;
-  gap: 1rem;
+  flex-direction: column;
+  gap: 0.85rem;
   padding-block-end: 1rem;
   border-block-end: 1px solid var(--border);
   margin-block-end: 1.5rem;
+}
+
+.header-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
 }
 
 .brand-button {
@@ -845,4 +850,241 @@ select {
   justify-content: space-between;
   gap: 0.75rem;
   font-size: 0.9rem;
+}
+
+/* Auth View & Account Controls */
+.auth-shell {
+  min-block-size: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem 1rem;
+}
+
+.auth-card {
+  inline-size: 100%;
+  max-inline-size: 420px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.75rem;
+  box-shadow: 0 20px 44px rgba(0, 0, 0, 0.45);
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  margin-block-end: 1.25rem;
+}
+
+.auth-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  margin-block-end: 1.25rem;
+}
+
+.auth-tabs .btn-tab {
+  justify-content: center;
+}
+
+.auth-tabs .btn-tab.is-active {
+  background: var(--bg-card-hover);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.auth-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  background: rgba(226, 178, 88, 0.12);
+  border: 1px solid rgba(226, 178, 88, 0.4);
+  color: var(--text);
+  padding: 0.75rem 0.9rem;
+  border-radius: 10px;
+  font-size: 0.88rem;
+  margin-block-end: 1rem;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.95rem;
+}
+
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.auth-field label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.auth-field input {
+  font: inherit;
+  flex: 0 0 auto;
+  inline-size: 100%;
+  background: var(--bg-elevated);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.65rem 0.8rem;
+  font-size: 0.95rem;
+}
+
+.auth-field input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.auth-submit {
+  margin-block-start: 0.35rem;
+  inline-size: 100%;
+  justify-content: center;
+}
+
+.user-menu {
+  position: relative;
+}
+
+.user-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.38rem 0.7rem;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.user-menu-trigger:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--accent);
+}
+
+.user-menu-trigger .is-rotated {
+  transform: rotate(180deg);
+}
+
+.user-menu-dropdown {
+  position: absolute;
+  inset-inline-end: 0;
+  inset-block-start: calc(100% + 0.45rem);
+  min-inline-size: 210px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.4rem;
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.5);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.user-menu-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.45rem 0.6rem 0.55rem;
+  border-block-end: 1px solid var(--border);
+  margin-block-end: 0.2rem;
+}
+
+.user-menu-email {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-menu-role {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid rgba(226, 178, 88, 0.45);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.user-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  inline-size: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+  color: var(--text);
+  font-size: 0.88rem;
+}
+
+.user-menu-item:hover {
+  background: var(--bg-card-hover);
+}
+
+.user-menu-item.is-danger:hover {
+  color: #ffdcd7;
+  background: rgba(248, 81, 73, 0.16);
+}
+
+.dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.invite-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.invite-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 0.8rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.invite-code {
+  font-size: 0.92rem;
+  margin-inline-end: 0.6rem;
+}
+
+.invite-badge {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+
+.invite-badge.is-active {
+  color: #aff5b4;
+  border-color: var(--emerald);
+  background: rgba(46, 168, 126, 0.14);
+}
+
+.invite-badge.is-used,
+.invite-badge.is-expired {
+  color: var(--text-muted);
 }

@@ -1,14 +1,19 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BookOpen, Brain, GraduationCap, Home, PhoneCall, Sparkles } from 'lucide-react';
 import { LiveAudioManager } from './audio.ts';
+import { AuthView } from './components/AuthView.tsx';
 import { FreeTalkView } from './components/FreeTalkView.tsx';
 import { HomeView } from './components/HomeView.tsx';
+import { InviteDialog } from './components/InviteDialog.tsx';
 import { MemoryView } from './components/MemoryView.tsx';
 import { ScenariosView } from './components/ScenariosView.tsx';
 import { SessionRecapDialog } from './components/SessionRecapDialog.tsx';
+import { UserMenu } from './components/UserMenu.tsx';
 import { VocabularyView } from './components/VocabularyView.tsx';
 import { useTopicAndCurriculum } from './hooks/useTopicAndCurriculum.ts';
 import {
+  AuthStatusResponse,
+  AuthUser,
   BootstrapData,
   CurriculumScenario,
   Persona,
@@ -20,6 +25,12 @@ import {
 type ActiveTab = 'home' | 'talk' | 'vocab' | 'curriculum' | 'memory';
 
 export default function App() {
+  const [authStatus, setAuthStatus] = useState<'loading' | 'unauthenticated' | 'authenticated'>('loading');
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [requiresBootstrapAdmin, setRequiresBootstrapAdmin] = useState<boolean>(false);
+  const [isInviteDialogOpen, setIsInviteDialogOpen] = useState<boolean>(false);
+  const inviteDialogRef = useRef<HTMLDialogElement | null>(null);
+
   const [data, setData] = useState<BootstrapData | null>(null);
   const [activeTab, setActiveTab] = useState<ActiveTab>('home');
   const [selectedPersonaId, setSelectedPersonaId] = useState<string>('');
@@ -66,6 +77,11 @@ export default function App() {
   const fetchBootstrap = useCallback(async () => {
     try {
       const res = await fetch('/api/bootstrap');
+      if (res.status === 401) {
+        setAuthStatus('unauthenticated');
+        setData(null);
+        return;
+      }
       if (!res.ok) throw new Error('Backend nicht erreichbar');
       const json = (await res.json()) as BootstrapData;
       setData(json);
@@ -77,9 +93,47 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => {
-    fetchBootstrap();
+  const checkAuthAndBootstrap = useCallback(async () => {
+    try {
+      const res = await fetch('/api/auth/me');
+      const auth = (await res.json()) as AuthStatusResponse;
+      setRequiresBootstrapAdmin(Boolean(auth.requiresBootstrapAdmin));
+
+      if (auth.authenticated && auth.user) {
+        setCurrentUser(auth.user);
+        setAuthStatus('authenticated');
+        await fetchBootstrap();
+      } else if (!auth.authEnforced) {
+        setCurrentUser(null);
+        setAuthStatus('authenticated');
+        await fetchBootstrap();
+      } else {
+        setCurrentUser(null);
+        setAuthStatus('unauthenticated');
+      }
+    } catch (err: any) {
+      setAuthStatus('authenticated');
+      setErrorMessage(
+        `Backend-Server nicht erreichbar (${err?.message || 'Verbindungsfehler'}).`
+      );
+    }
   }, [fetchBootstrap]);
+
+  useEffect(() => {
+    checkAuthAndBootstrap();
+  }, [checkAuthAndBootstrap]);
+
+  const handleLogout = useCallback(async () => {
+    audioRef.current?.stopAll();
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.close();
+    }
+    setCallState('idle');
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => null);
+    setCurrentUser(null);
+    setData(null);
+    setAuthStatus('unauthenticated');
+  }, []);
 
   // Live call duration timer
   useEffect(() => {
@@ -362,6 +416,29 @@ export default function App() {
     [fetchBootstrap]
   );
 
+  if (authStatus === 'loading') {
+    return (
+      <main className="app-shell">
+        <p>Lade CAI Labs Learn Chinese...</p>
+      </main>
+    );
+  }
+
+  if (authStatus === 'unauthenticated') {
+    return (
+      <AuthView
+        requiresBootstrapAdmin={requiresBootstrapAdmin}
+        onAuthenticated={(user) => {
+          setCurrentUser(user);
+          setRequiresBootstrapAdmin(false);
+          setAuthStatus('authenticated');
+          setErrorMessage('');
+          fetchBootstrap();
+        }}
+      />
+    );
+  }
+
   if (!data) {
     return (
       <main className="app-shell">
@@ -370,7 +447,7 @@ export default function App() {
             <span>{errorMessage}</span>
           </div>
         ) : (
-          <p>Lade Learn Chinese...</p>
+          <p>Lade CAI Labs Learn Chinese...</p>
         )}
       </main>
     );
@@ -385,20 +462,33 @@ export default function App() {
   return (
     <div className="app-shell">
       <header className="top-header">
-        <button
-          type="button"
-          className="brand-button"
-          aria-label="Zurück zur Startseite"
-          onClick={() => setActiveTab('home')}
-        >
-          <img src="/logo.png" alt="C.AI Labs" className="brand-logo" width={38} height={38} />
-          <div className="brand-text">
-            <h1 className="brand-title">Learn Chinese</h1>
-            <span className="brand-subtitle" lang="zh-Hans">
-              中文对话 · C.AI Labs
-            </span>
-          </div>
-        </button>
+        <div className="header-top-row">
+          <button
+            type="button"
+            className="brand-button"
+            aria-label="Zurück zur Startseite"
+            onClick={() => setActiveTab('home')}
+          >
+            <img src="/logo.png" alt="C.AI Labs" className="brand-logo" width={38} height={38} />
+            <div className="brand-text">
+              <h1 className="brand-title">CAI Labs Learn Chinese</h1>
+              <span className="brand-subtitle" lang="zh-Hans">
+                中文对话
+              </span>
+            </div>
+          </button>
+
+          {currentUser && (
+            <UserMenu
+              user={currentUser}
+              onOpenInvites={() => {
+                setIsInviteDialogOpen(true);
+                inviteDialogRef.current?.showModal();
+              }}
+              onLogout={handleLogout}
+            />
+          )}
+        </div>
 
         <nav className="tab-nav" aria-label="Hauptnavigation">
           <button
@@ -569,6 +659,11 @@ export default function App() {
       </main>
 
       <SessionRecapDialog dialogRef={recapDialogRef} recap={lastRecap} />
+      <InviteDialog
+        dialogRef={inviteDialogRef}
+        isOpen={isInviteDialogOpen}
+        onClose={() => setIsInviteDialogOpen(false)}
+      />
     </div>
   );
 }

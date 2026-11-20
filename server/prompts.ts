@@ -1,6 +1,7 @@
 import { FunctionDeclaration, Type } from '@google/genai';
 import { getSeasonalContext } from './curriculum.ts';
 import {
+  DEFAULT_USER_ID,
   getAllMemoryFacts,
   getAllPersonas,
   getDueVocabulary,
@@ -13,19 +14,24 @@ import {
   getScenarioById,
 } from './db.ts';
 
-export function buildSystemPrompt(personaId: string, scenarioId?: string, customTopic?: string) {
-  const profile = getLearnerProfile();
-  const fallbackPersona = getAllPersonas()[0];
-  const persona = getPersonaById(personaId) ?? fallbackPersona;
-  const scenario = scenarioId ? getScenarioById(scenarioId) : undefined;
-  const facts = getAllMemoryFacts();
-  const myEpisodes = getRecentEpisodesForPersona(persona.id, 3);
-  const otherEpisodes = getRecentFamilyEpisodesAcrossAll(4).filter(
+export function buildSystemPrompt(
+  personaId: string,
+  scenarioId?: string,
+  customTopic?: string,
+  userId = DEFAULT_USER_ID
+) {
+  const profile = getLearnerProfile(userId);
+  const fallbackPersona = getAllPersonas(userId)[0];
+  const persona = getPersonaById(personaId, userId) ?? fallbackPersona;
+  const scenario = scenarioId ? getScenarioById(scenarioId, userId) : undefined;
+  const facts = getAllMemoryFacts(userId);
+  const myEpisodes = getRecentEpisodesForPersona(persona.id, 3, userId);
+  const otherEpisodes = getRecentFamilyEpisodesAcrossAll(4, userId).filter(
     (ep) => ep.persona_id !== persona.id
   );
-  const skills = getLearnerSkills();
-  const dueWords = getDueVocabulary(6);
-  const stats = getLearningStats();
+  const skills = getLearnerSkills(userId);
+  const dueWords = getDueVocabulary(6, userId);
+  const stats = getLearningStats(userId);
   const seasonal = getSeasonalContext();
 
   const effectivePacing =
