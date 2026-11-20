@@ -6,6 +6,8 @@ import { FreeTalkView } from './components/FreeTalkView.tsx';
 import { HomeView } from './components/HomeView.tsx';
 import { InviteDialog } from './components/InviteDialog.tsx';
 import { MemoryView } from './components/MemoryView.tsx';
+import { OnboardingDialog } from './components/OnboardingDialog.tsx';
+import { PersonaEditorDialog } from './components/PersonaEditorDialog.tsx';
 import { ScenariosView } from './components/ScenariosView.tsx';
 import { SessionRecapDialog } from './components/SessionRecapDialog.tsx';
 import { UserMenu } from './components/UserMenu.tsx';
@@ -30,6 +32,12 @@ export default function App() {
   const [requiresBootstrapAdmin, setRequiresBootstrapAdmin] = useState<boolean>(false);
   const [isInviteDialogOpen, setIsInviteDialogOpen] = useState<boolean>(false);
   const inviteDialogRef = useRef<HTMLDialogElement | null>(null);
+  const [isOnboardingOpen, setIsOnboardingOpen] = useState<boolean>(false);
+  const onboardingDialogRef = useRef<HTMLDialogElement | null>(null);
+  const [isPersonaEditorOpen, setIsPersonaEditorOpen] = useState<boolean>(false);
+  const [editingPersona, setEditingPersona] = useState<Persona | null>(null);
+  const personaEditorDialogRef = useRef<HTMLDialogElement | null>(null);
+  const hasAutoOpenedOnboardingRef = useRef<boolean>(false);
 
   const [data, setData] = useState<BootstrapData | null>(null);
   const [activeTab, setActiveTab] = useState<ActiveTab>('home');
@@ -85,7 +93,19 @@ export default function App() {
       if (!res.ok) throw new Error('Backend nicht erreichbar');
       const json = (await res.json()) as BootstrapData;
       setData(json);
-      setSelectedPersonaId((prev) => prev || json.personas[0]?.id || '');
+      setSelectedPersonaId((prev) => {
+        if (prev && json.personas.some((p) => p.id === prev)) return prev;
+        return json.personas[0]?.id || '';
+      });
+      if (!hasAutoOpenedOnboardingRef.current && json.profile?.onboarding_completed === 0) {
+        hasAutoOpenedOnboardingRef.current = true;
+        window.setTimeout(() => {
+          setIsOnboardingOpen(true);
+          if (onboardingDialogRef.current && !onboardingDialogRef.current.open) {
+            onboardingDialogRef.current.showModal();
+          }
+        }, 120);
+      }
     } catch (err: any) {
       setErrorMessage(
         `Backend-Server nicht erreichbar (${err?.message || 'Verbindungsfehler'}).`
@@ -130,6 +150,7 @@ export default function App() {
     }
     setCallState('idle');
     await fetch('/api/auth/logout', { method: 'POST' }).catch(() => null);
+    hasAutoOpenedOnboardingRef.current = false;
     setCurrentUser(null);
     setData(null);
     setAuthStatus('unauthenticated');
@@ -481,6 +502,10 @@ export default function App() {
           {currentUser && (
             <UserMenu
               user={currentUser}
+              onOpenOnboarding={() => {
+                setIsOnboardingOpen(true);
+                onboardingDialogRef.current?.showModal();
+              }}
               onOpenInvites={() => {
                 setIsInviteDialogOpen(true);
                 inviteDialogRef.current?.showModal();
@@ -587,6 +612,10 @@ export default function App() {
             }}
             onNavigate={(tab) => setActiveTab(tab)}
             onChangeComplexity={handleChangeComplexity}
+            onOpenOnboarding={() => {
+              setIsOnboardingOpen(true);
+              onboardingDialogRef.current?.showModal();
+            }}
           />
         )}
 
@@ -649,11 +678,33 @@ export default function App() {
 
         {activeTab === 'memory' && (
           <MemoryView
+            personas={data.personas}
             memoryFacts={data.memoryFacts}
             recentEpisodes={data.recentEpisodes}
             skills={data.skills}
             onAddMemoryFact={handleAddMemoryFact}
             onDeleteMemoryFact={handleDeleteMemoryFact}
+            onOpenPersonaEditor={(persona) => {
+              setEditingPersona(persona ?? null);
+              setIsPersonaEditorOpen(true);
+              personaEditorDialogRef.current?.showModal();
+            }}
+            onDeletePersona={async (personaId) => {
+              const res = await fetch(`/api/personas/${encodeURIComponent(personaId)}`, {
+                method: 'DELETE',
+              });
+              const json = await res.json();
+              if (!res.ok) {
+                setErrorMessage(json.error || 'Person konnte nicht gelöscht werden.');
+                return;
+              }
+              showToast('Person entfernt.');
+              await fetchBootstrap();
+            }}
+            onOpenOnboarding={() => {
+              setIsOnboardingOpen(true);
+              onboardingDialogRef.current?.showModal();
+            }}
           />
         )}
       </main>
@@ -663,6 +714,33 @@ export default function App() {
         dialogRef={inviteDialogRef}
         isOpen={isInviteDialogOpen}
         onClose={() => setIsInviteDialogOpen(false)}
+      />
+      <OnboardingDialog
+        dialogRef={onboardingDialogRef}
+        isOpen={isOnboardingOpen}
+        hasApiKey={data.hasApiKey}
+        profile={data.profile}
+        personas={data.personas}
+        onClose={() => setIsOnboardingOpen(false)}
+        onRefreshBootstrap={fetchBootstrap}
+        onOpenPersonaEditor={(persona) => {
+          setEditingPersona(persona ?? null);
+          setIsPersonaEditorOpen(true);
+          personaEditorDialogRef.current?.showModal();
+        }}
+      />
+      <PersonaEditorDialog
+        dialogRef={personaEditorDialogRef}
+        isOpen={isPersonaEditorOpen}
+        editingPersona={editingPersona}
+        onClose={() => {
+          setIsPersonaEditorOpen(false);
+          setEditingPersona(null);
+        }}
+        onSaved={async (saved) => {
+          showToast(`${saved.avatar_emoji} ${saved.name_hanzi} gespeichert.`);
+          await fetchBootstrap();
+        }}
       />
     </div>
   );

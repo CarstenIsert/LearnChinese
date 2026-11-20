@@ -5,6 +5,7 @@ export interface LearnerProfile {
   native_language: string;
   summary: string;
   sentence_complexity?: 'auto' | 'short' | 'medium' | 'natural';
+  onboarding_completed?: number;
 }
 
 export interface LearningStats {

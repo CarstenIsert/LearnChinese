@@ -1,21 +1,29 @@
 import React, { useState } from 'react';
-import { Plus, Trash2 } from 'lucide-react';
-import { LearnerSkill, MemoryFact, PersonaEpisode } from '../types.ts';
+import { Pencil, Plus, Sparkles, Trash2 } from 'lucide-react';
+import { LearnerSkill, MemoryFact, Persona, PersonaEpisode } from '../types.ts';
 
 interface MemoryViewProps {
+  personas: Persona[];
   memoryFacts: MemoryFact[];
   recentEpisodes: PersonaEpisode[];
   skills: LearnerSkill[];
   onAddMemoryFact: (category: string, fact: string) => Promise<void>;
   onDeleteMemoryFact: (id: number) => Promise<void>;
+  onOpenPersonaEditor: (persona?: Persona) => void;
+  onDeletePersona: (personaId: string) => Promise<void>;
+  onOpenOnboarding: () => void;
 }
 
 export function MemoryView({
+  personas,
   memoryFacts,
   recentEpisodes,
   skills,
   onAddMemoryFact,
   onDeleteMemoryFact,
+  onOpenPersonaEditor,
+  onDeletePersona,
+  onOpenOnboarding,
 }: MemoryViewProps) {
   const [newFactCategory, setNewFactCategory] = useState<string>('travel_plans');
   const [newFactText, setNewFactText] = useState<string>('');
@@ -29,6 +37,74 @@ export function MemoryView({
 
   return (
     <section aria-label="Gedächtnis">
+      <div className="panel-card" style={{ marginBlockEnd: '1rem' }}>
+        <div className="personas-panel-header">
+          <div>
+            <h2 style={{ margin: 0 }}>Gesprächspartner &amp; Umfeld</h2>
+            <p className="muted-text" style={{ margin: '0.2rem 0 0', fontSize: '0.85rem' }}>
+              Lege fest, mit wem du Chinesisch übst, oder starte den deutschen Einrichtungs-Assistenten.
+            </p>
+          </div>
+          <div className="personas-panel-actions">
+            <button type="button" className="btn-secondary btn-sm" onClick={onOpenOnboarding}>
+              <Sparkles size={14} aria-hidden="true" /> Einrichtungs-Assistent
+            </button>
+            <button type="button" className="btn-primary btn-sm" onClick={() => onOpenPersonaEditor()}>
+              <Plus size={14} aria-hidden="true" /> Neue Person
+            </button>
+          </div>
+        </div>
+
+        <div className="personas-manage-grid">
+          {personas.map((p) => (
+            <div key={p.id} className="persona-manage-card">
+              <div className="persona-manage-info">
+                <span className="persona-manage-emoji" aria-hidden="true">
+                  {p.avatar_emoji}
+                </span>
+                <div>
+                  <div className="persona-manage-name">
+                    <strong lang="zh-Hans">{p.name_hanzi}</strong>{' '}
+                    <span className="muted-text">({p.name_pinyin})</span>
+                  </div>
+                  <div className="persona-manage-rel">
+                    {p.relationship_de} · {p.age_group}
+                  </div>
+                </div>
+              </div>
+              <div className="persona-manage-buttons">
+                <button
+                  type="button"
+                  className="btn-secondary btn-sm"
+                  aria-label={`${p.name_hanzi} bearbeiten`}
+                  onClick={() => onOpenPersonaEditor(p)}
+                >
+                  <Pencil size={13} aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary btn-sm"
+                  aria-label={`${p.name_hanzi} löschen`}
+                  disabled={personas.length <= 1}
+                  title={
+                    personas.length <= 1
+                      ? 'Mindestens eine Person muss bleiben'
+                      : 'Person entfernen'
+                  }
+                  onClick={() => {
+                    if (window.confirm(`„${p.name_hanzi} (${p.relationship_de})“ wirklich entfernen?`)) {
+                      onDeletePersona(p.id);
+                    }
+                  }}
+                >
+                  <Trash2 size={13} aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
       <div className="two-col-grid">
         <div className="panel-card">
           <h2>Gespeicherte Fakten</h2>

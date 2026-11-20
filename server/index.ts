@@ -18,6 +18,7 @@ import {
   createSessionRecord,
   DEFAULT_USER_ID,
   deleteMemoryFact,
+  deletePersona,
   getAllMemoryFacts,
   getAllPersonas,
   getAllScenarios,
@@ -32,7 +33,9 @@ import {
   initDatabase,
   recordVocabularyReview,
   saveOrUpdateVocabulary,
+  updateLearnerProfile,
   updateSentenceComplexityPreference,
+  upsertPersona,
 } from './db.ts';
 import {
   AuthUser,
@@ -41,7 +44,12 @@ import {
   isAuthEnforced,
   requireAuth,
 } from './auth.ts';
-import { buildSystemPrompt, LIVE_TOOLS_DECLARATIONS } from './prompts.ts';
+import {
+  buildOnboardingSystemPrompt,
+  buildSystemPrompt,
+  LIVE_TOOLS_DECLARATIONS,
+  ONBOARDING_TOOLS_DECLARATIONS,
+} from './prompts.ts';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config();
@@ -401,6 +409,81 @@ app.post('/api/memories', (req, res) => {
   res.json({ id, facts: getAllMemoryFacts(userId) });
 });
 
+app.post('/api/profile/onboarding', (req, res) => {
+  const userId = req.user?.id ?? DEFAULT_USER_ID;
+  const { name, level, summary, onboarding_completed } = (req.body || {}) as {
+    name?: string;
+    level?: string;
+    summary?: string;
+    onboarding_completed?: boolean | number;
+  };
+  const updated = updateLearnerProfile(
+    {
+      name,
+      level,
+      summary,
+      onboarding_completed:
+        onboarding_completed !== undefined ? (onboarding_completed ? 1 : 0) : undefined,
+    },
+    userId
+  );
+  res.json({ profile: updated });
+});
+
+function buildPersonaInput(body: Record<string, any>, idOverride?: string) {
+  return {
+    id: idOverride ?? (body.id ? String(body.id) : undefined),
+    name_hanzi: String(body.name_hanzi),
+    name_pinyin: String(body.name_pinyin || body.name_hanzi),
+    relationship_de: String(body.relationship_de),
+    generation: body.generation ? String(body.generation) : undefined,
+    age_group: body.age_group ? String(body.age_group) : undefined,
+    voice_name: body.voice_name ? String(body.voice_name) : undefined,
+    avatar_emoji: body.avatar_emoji ? String(body.avatar_emoji) : undefined,
+    personality_prompt: body.personality_prompt ? String(body.personality_prompt) : undefined,
+    speaking_style: body.speaking_style ? String(body.speaking_style) : undefined,
+    initial_hook: body.initial_hook ? String(body.initial_hook) : undefined,
+  };
+}
+
+app.post('/api/personas', (req, res) => {
+  const userId = req.user?.id ?? DEFAULT_USER_ID;
+  const body = (req.body || {}) as Record<string, any>;
+  if (!body.name_hanzi?.trim() || !body.relationship_de?.trim()) {
+    res.status(400).json({ error: 'Chinesischer Name und Beziehung auf Deutsch sind erforderlich.' });
+    return;
+  }
+  const persona = upsertPersona(buildPersonaInput(body), userId);
+  res.json({ persona, personas: getAllPersonas(userId) });
+});
+
+app.put('/api/personas/:id', (req, res) => {
+  const userId = req.user?.id ?? DEFAULT_USER_ID;
+  const id = String(req.params.id || '').trim();
+  const body = (req.body || {}) as Record<string, any>;
+  if (!id || !body.name_hanzi?.trim() || !body.relationship_de?.trim()) {
+    res.status(400).json({ error: 'ID, chinesischer Name und Beziehung sind erforderlich.' });
+    return;
+  }
+  if (!getPersonaById(id, userId)) {
+    res.status(404).json({ error: 'Person nicht gefunden.' });
+    return;
+  }
+  const persona = upsertPersona(buildPersonaInput(body, id), userId);
+  res.json({ persona, personas: getAllPersonas(userId) });
+});
+
+app.delete('/api/personas/:id', (req, res) => {
+  const userId = req.user?.id ?? DEFAULT_USER_ID;
+  const id = String(req.params.id || '').trim();
+  const result = deletePersona(id, userId);
+  if (!result.ok) {
+    res.status(400).json({ error: result.error });
+    return;
+  }
+  res.json({ ok: true, personas: getAllPersonas(userId) });
+});
+
 app.delete('/api/memories/:id', (req, res) => {
   const userId = req.user?.id ?? DEFAULT_USER_ID;
   const id = Number(req.params.id);
@@ -548,6 +631,7 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
   let currentSessionDbId: number | null = null;
   let currentPersonaId = 'coach-lin';
   let currentScenarioId: string | undefined = undefined;
+  let isOnboardingMode = false;
   let sessionStartMs = 0;
   let toneAnalysisEnabled = false;
   const userSpeechChunks: Buffer[] = [];
@@ -586,8 +670,8 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
     try {
       const msg = JSON.parse(rawData.toString());
 
-      // 1. Start a new Gemini Live voice session
-      if (msg.type === 'start_session') {
+      // 1. Start a new Gemini Live voice session (regular Chinese practice OR German onboarding)
+      if (msg.type === 'start_session' || msg.type === 'start_onboarding') {
         if (!hasValidApiKey()) {
           sendToClient({
             type: 'error',
@@ -597,22 +681,41 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
           return;
         }
 
-        const fallbackPersona = getAllPersonas(userId)[0];
-        currentPersonaId = msg.personaId || fallbackPersona.id;
-        currentScenarioId = msg.scenarioId || undefined;
-        const customTopic = msg.topic ? String(msg.topic) : undefined;
-        const persona = getPersonaById(currentPersonaId, userId) ?? fallbackPersona;
-        const systemInstruction = buildSystemPrompt(
-          currentPersonaId,
-          currentScenarioId,
-          customTopic,
-          userId
-        );
+        isOnboardingMode = msg.type === 'start_onboarding';
+        let voiceName = 'Aoede';
+        let systemInstruction = '';
+        let greetingText = '';
+        let statusText = '';
 
-        // Create session row in SQLite
-        currentSessionDbId = createSessionRecord(currentPersonaId, currentScenarioId ?? null, userId);
-        sessionStartMs = Date.now();
-        toneAnalysisEnabled = Boolean(msg.enableToneAnalysis);
+        if (isOnboardingMode) {
+          currentSessionDbId = null;
+          toneAnalysisEnabled = false;
+          systemInstruction = buildOnboardingSystemPrompt(userId);
+          statusText = 'Verbinde mit deinem deutschen Einrichtungs-Assistenten...';
+          greetingText = `(System: Das Einrichtungs-Gespräch beginnt. Begrüße ${getLearnerProfile(userId).name} herzlich auf Deutsch, erkläre in einem kurzen Satz, dass ihr gemeinsam kurz Profil und Gesprächspartner festlegt, und stelle die erste einfache Frage.)`;
+        } else {
+          const fallbackPersona = getAllPersonas(userId)[0];
+          currentPersonaId = msg.personaId || fallbackPersona.id;
+          currentScenarioId = msg.scenarioId || undefined;
+          const customTopic = msg.topic ? String(msg.topic) : undefined;
+          const persona = getPersonaById(currentPersonaId, userId) ?? fallbackPersona;
+          voiceName = persona.voice_name;
+          systemInstruction = buildSystemPrompt(
+            currentPersonaId,
+            currentScenarioId,
+            customTopic,
+            userId
+          );
+          currentSessionDbId = createSessionRecord(currentPersonaId, currentScenarioId ?? null, userId);
+          sessionStartMs = Date.now();
+          toneAnalysisEnabled = Boolean(msg.enableToneAnalysis);
+          const openingTopicNote = customTopic
+            ? `Schlage zum Einstieg locker dieses Gesprächsthema vor: "${customTopic}".`
+            : 'Stelle eine einfache, natürliche Einstiegsfrage.';
+          statusText = `Verbinde mit ${persona.name_hanzi} (${LIVE_MODEL})...`;
+          greetingText = `(System: Das Gespräch hat begonnen. Begrüße ${getLearnerProfile(userId).name} herzlich auf Chinesisch in deiner Rolle als ${persona.name_hanzi}. ${openingTopicNote})`;
+        }
+
         userSpeechChunks.length = 0;
         userSpeechBytes = 0;
 
@@ -621,7 +724,7 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
         sendToClient({
           type: 'status',
           status: 'connecting',
-          message: `Verbinde mit ${persona.name_hanzi} (${LIVE_MODEL})...`,
+          message: statusText,
         });
 
         geminiSession = await ai.live.connect({
@@ -631,7 +734,7 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
             speechConfig: {
               voiceConfig: {
                 prebuiltVoiceConfig: {
-                  voiceName: persona.voice_name,
+                  voiceName,
                 },
               },
             },
@@ -640,7 +743,13 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
             },
             inputAudioTranscription: {},
             outputAudioTranscription: {},
-            tools: [{ functionDeclarations: LIVE_TOOLS_DECLARATIONS }],
+            tools: [
+              {
+                functionDeclarations: isOnboardingMode
+                  ? ONBOARDING_TOOLS_DECLARATIONS
+                  : LIVE_TOOLS_DECLARATIONS,
+              },
+            ],
           },
           callbacks: {
             onopen: () => {
@@ -648,7 +757,8 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
                 type: 'session_started',
                 sessionId: currentSessionDbId,
                 personaId: currentPersonaId,
-                voiceName: persona.voice_name,
+                voiceName,
+                isOnboarding: isOnboardingMode,
               });
             },
             onmessage: async (serverMsg: LiveServerMessage) => {
@@ -785,10 +895,15 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
                       name: call.name,
                       response: { result: `Recorded SRS review outcome: ${outcome}` },
                     });
-                  } else if (call.name === 'remember_fact') {
+                  } else if (call.name === 'remember_fact' || call.name === 'save_environment_fact') {
                     const category = String(args.category || 'general');
                     const fact = String(args.fact || '');
-                    const factId = addMemoryFact(category, fact, currentPersonaId, userId);
+                    const factId = addMemoryFact(
+                      category,
+                      fact,
+                      isOnboardingMode ? 'onboarding' : currentPersonaId,
+                      userId
+                    );
 
                     sendToClient({
                       type: 'memory_saved_toast',
@@ -799,6 +914,63 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
                       id: call.id,
                       name: call.name,
                       response: { result: 'Fact saved to long-term memory.' },
+                    });
+                  } else if (call.name === 'update_learner_profile') {
+                    const updatedProfile = updateLearnerProfile(
+                      {
+                        name: args.name ? String(args.name) : undefined,
+                        level: args.level ? String(args.level) : undefined,
+                        summary: args.summary ? String(args.summary) : undefined,
+                      },
+                      userId
+                    );
+                    sendToClient({
+                      type: 'onboarding_profile_updated',
+                      profile: updatedProfile,
+                    });
+                    functionResponses.push({
+                      id: call.id,
+                      name: call.name,
+                      response: { result: 'Learner profile updated.' },
+                    });
+                  } else if (call.name === 'add_or_update_person') {
+                    const savedPersona = upsertPersona(
+                      {
+                        name_hanzi: String(args.name_hanzi || '朋友'),
+                        name_pinyin: String(args.name_pinyin || 'Péngyou'),
+                        relationship_de: String(args.relationship_de || 'Gesprächspartner'),
+                        age_group: args.age_group ? String(args.age_group) : undefined,
+                        voice_name: args.voice_name ? String(args.voice_name) : undefined,
+                        avatar_emoji: args.avatar_emoji ? String(args.avatar_emoji) : undefined,
+                        personality_prompt: args.personality_prompt
+                          ? String(args.personality_prompt)
+                          : undefined,
+                      },
+                      userId
+                    );
+                    sendToClient({
+                      type: 'onboarding_person_saved',
+                      persona: savedPersona,
+                    });
+                    functionResponses.push({
+                      id: call.id,
+                      name: call.name,
+                      response: {
+                        result: `Person ${savedPersona.name_hanzi} (${savedPersona.relationship_de}) saved.`,
+                      },
+                    });
+                  } else if (call.name === 'finish_onboarding') {
+                    updateLearnerProfile({ onboarding_completed: 1 }, userId);
+                    sendToClient({
+                      type: 'onboarding_completed',
+                      summary_de: args.summary_de
+                        ? String(args.summary_de)
+                        : 'Einrichtung abgeschlossen!',
+                    });
+                    functionResponses.push({
+                      id: call.id,
+                      name: call.name,
+                      response: { result: 'Onboarding marked as completed.' },
                     });
                   } else {
                     functionResponses.push({
@@ -833,10 +1005,6 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
           },
         });
 
-        const openingTopicNote = customTopic
-          ? `Schlage zum Einstieg locker dieses Gesprächsthema vor: "${customTopic}".`
-          : 'Stelle eine einfache, natürliche Einstiegsfrage.';
-
         setTimeout(() => {
           if (geminiSession) {
             try {
@@ -844,11 +1012,7 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
                 turns: [
                   {
                     role: 'user',
-                    parts: [
-                      {
-                        text: `(System: Das Gespräch hat begonnen. Begrüße ${getLearnerProfile(userId).name} herzlich auf Chinesisch in deiner Rolle als ${persona.name_hanzi}. ${openingTopicNote})`,
-                      },
-                    ],
+                    parts: [{ text: greetingText }],
                   },
                 ],
                 turnComplete: true,
@@ -915,6 +1079,11 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
             // ignore
           }
           geminiSession = null;
+        }
+
+        if (isOnboardingMode) {
+          sendToClient({ type: 'onboarding_session_ended' });
+          return;
         }
 
         sendToClient({

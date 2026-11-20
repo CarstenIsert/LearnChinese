@@ -1,14 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ChevronDown, LogOut, User, UserPlus } from 'lucide-react';
+import { ChevronDown, LogOut, Sparkles, User, UserPlus } from 'lucide-react';
 import { AuthUser } from '../types.ts';
 
 interface UserMenuProps {
   user: AuthUser;
+  onOpenOnboarding: () => void;
   onOpenInvites: () => void;
   onLogout: () => void;
 }
 
-export function UserMenu({ user, onOpenInvites, onLogout }: UserMenuProps) {
+export function UserMenu({ user, onOpenOnboarding, onOpenInvites, onLogout }: UserMenuProps) {
   const [isOpen, setIsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
@@ -55,6 +56,19 @@ export function UserMenu({ user, onOpenInvites, onLogout }: UserMenuProps) {
             <span className="user-menu-email">{user.email}</span>
             {user.role === 'admin' && <span className="user-menu-role">Admin</span>}
           </div>
+
+          <button
+            type="button"
+            role="menuitem"
+            className="user-menu-item"
+            onClick={() => {
+              setIsOpen(false);
+              onOpenOnboarding();
+            }}
+          >
+            <Sparkles size={15} aria-hidden="true" />
+            Profil &amp; Personen einrichten
+          </button>
 
           {user.role === 'admin' && (
             <button

@@ -31,6 +31,7 @@ interface HomeViewProps {
   onStartFreeTalk: () => void;
   onNavigate: (tab: 'talk' | 'vocab' | 'curriculum' | 'memory') => void;
   onChangeComplexity: (pref: 'auto' | 'short' | 'medium' | 'natural') => void;
+  onOpenOnboarding: () => void;
 }
 
 export function formatDurationDe(totalSeconds: number): string {
@@ -58,6 +59,7 @@ export function HomeView({
   onStartFreeTalk,
   onNavigate,
   onChangeComplexity,
+  onOpenOnboarding,
 }: HomeViewProps) {
   const selectedPersona = personas.find((p) => p.id === selectedPersonaId) || personas[0];
   const practicedScenarios = scenarios.filter((s) => s.times_practiced > 0).length;
@@ -131,6 +133,15 @@ export function HomeView({
               </button>
             );
           })}
+          <button
+            type="button"
+            className="partner-pill"
+            onClick={onOpenOnboarding}
+            title="Personen & Profil mit dem deutschen Assistenten einrichten"
+          >
+            <Sparkles size={14} aria-hidden="true" />
+            <span>Einrichten / Personen</span>
+          </button>
         </div>
       </div>
 

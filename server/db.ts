@@ -193,6 +193,15 @@ export function initDatabase() {
 
   migrateToMultiUserSchema();
 
+  if (!hasColumn('learner_profile', 'onboarding_completed')) {
+    db.exec(`ALTER TABLE learner_profile ADD COLUMN onboarding_completed INTEGER NOT NULL DEFAULT 0`);
+    db.exec(`
+      UPDATE learner_profile
+      SET onboarding_completed = 1
+      WHERE user_id IN (SELECT DISTINCT user_id FROM sessions)
+    `);
+  }
+
   seedUserWorkspace(DEFAULT_USER_ID, { useLocalSeed: true });
 }
 
@@ -385,30 +394,42 @@ export function seedUserWorkspace(
       ? seedData.initialSkills
       : INITIAL_DEFAULT_SKILLS;
 
-  const insertPersona = db.prepare(`
-    INSERT OR IGNORE INTO personas (
-      user_id, id, name_hanzi, name_pinyin, relationship_de, generation, age_group,
-      voice_name, avatar_emoji, personality_prompt, speaking_style, initial_hook
-    ) VALUES (
-      @user_id, @id, @name_hanzi, @name_pinyin, @relationship_de, @generation, @age_group,
-      @voice_name, @avatar_emoji, @personality_prompt, @speaking_style, @initial_hook
-    )
-  `);
-  for (const p of personasToSeed) {
-    insertPersona.run({ ...p, user_id: userId });
+  const personaCount = (
+    db.prepare('SELECT COUNT(*) as c FROM personas WHERE user_id = ?').get(userId) as { c: number }
+  ).c;
+  if (personaCount === 0) {
+    const insertPersona = db.prepare(`
+      INSERT OR IGNORE INTO personas (
+        user_id, id, name_hanzi, name_pinyin, relationship_de, generation, age_group,
+        voice_name, avatar_emoji, personality_prompt, speaking_style, initial_hook
+      ) VALUES (
+        @user_id, @id, @name_hanzi, @name_pinyin, @relationship_de, @generation, @age_group,
+        @voice_name, @avatar_emoji, @personality_prompt, @speaking_style, @initial_hook
+      )
+    `);
+    for (const p of personasToSeed) {
+      insertPersona.run({ ...p, user_id: userId });
+    }
   }
 
-  const insertScenario = db.prepare(`
-    INSERT OR IGNORE INTO curriculum_scenarios (
-      user_id, id, stage_number, stage_title_de, title_de, title_hanzi,
-      description_de, persona_id, target_grammar, suggested_vocab
-    ) VALUES (
-      @user_id, @id, @stage_number, @stage_title_de, @title_de, @title_hanzi,
-      @description_de, @persona_id, @target_grammar, @suggested_vocab
-    )
-  `);
-  for (const s of scenariosToSeed) {
-    insertScenario.run({ ...s, user_id: userId });
+  const scenarioCount = (
+    db.prepare('SELECT COUNT(*) as c FROM curriculum_scenarios WHERE user_id = ?').get(userId) as {
+      c: number;
+    }
+  ).c;
+  if (scenarioCount === 0) {
+    const insertScenario = db.prepare(`
+      INSERT OR IGNORE INTO curriculum_scenarios (
+        user_id, id, stage_number, stage_title_de, title_de, title_hanzi,
+        description_de, persona_id, target_grammar, suggested_vocab
+      ) VALUES (
+        @user_id, @id, @stage_number, @stage_title_de, @title_de, @title_hanzi,
+        @description_de, @persona_id, @target_grammar, @suggested_vocab
+      )
+    `);
+    for (const s of scenariosToSeed) {
+      insertScenario.run({ ...s, user_id: userId });
+    }
   }
 
   const vocabCount = (
@@ -480,7 +501,37 @@ export function getLearnerProfile(userId = DEFAULT_USER_ID) {
     native_language: string;
     summary: string;
     sentence_complexity?: 'auto' | 'short' | 'medium' | 'natural';
+    onboarding_completed?: number;
   };
+}
+
+export function updateLearnerProfile(
+  updates: {
+    name?: string;
+    level?: string;
+    summary?: string;
+    onboarding_completed?: number;
+  },
+  userId = DEFAULT_USER_ID
+) {
+  const existing = getLearnerProfile(userId);
+  if (!existing) return null;
+  const name = updates.name !== undefined ? updates.name.trim() || existing.name : existing.name;
+  const level = updates.level !== undefined ? updates.level.trim() || existing.level : existing.level;
+  const summary =
+    updates.summary !== undefined ? updates.summary.trim() || existing.summary : existing.summary;
+  const onboardingCompleted =
+    updates.onboarding_completed !== undefined
+      ? updates.onboarding_completed
+      : existing.onboarding_completed ?? 0;
+
+  db.prepare(
+    `UPDATE learner_profile
+     SET name = ?, level = ?, summary = ?, onboarding_completed = ?, updated_at = datetime('now')
+     WHERE user_id = ?`
+  ).run(name, level, summary, onboardingCompleted, userId);
+
+  return getLearnerProfile(userId);
 }
 
 export function updateSentenceComplexityPreference(
@@ -617,6 +668,124 @@ export function getPersonaById(id: string, userId = DEFAULT_USER_ID) {
   return db.prepare('SELECT * FROM personas WHERE user_id = ? AND id = ?').get(userId, id) as
     | ReturnType<typeof getAllPersonas>[number]
     | undefined;
+}
+
+export interface UpsertPersonaInput {
+  id?: string;
+  name_hanzi: string;
+  name_pinyin: string;
+  relationship_de: string;
+  generation?: string;
+  age_group?: string;
+  voice_name?: string;
+  avatar_emoji?: string;
+  personality_prompt?: string;
+  speaking_style?: string;
+  initial_hook?: string;
+}
+
+/** Create or update a conversation persona for a user, filling sensible defaults for optional fields. */
+export function upsertPersona(input: UpsertPersonaInput, userId = DEFAULT_USER_ID) {
+  const nameHanzi = input.name_hanzi.trim();
+  const namePinyin = input.name_pinyin.trim() || nameHanzi;
+  const relationshipDe = input.relationship_de.trim();
+  const ageGroup = input.age_group?.trim() || 'Erwachsene';
+  const generation = input.generation?.trim() || ageGroup;
+  const voiceName = input.voice_name?.trim() || 'Aoede';
+  const avatarEmoji = input.avatar_emoji?.trim() || '🧑';
+  const personalityPrompt =
+    input.personality_prompt?.trim() ||
+    `You are ${nameHanzi} (${namePinyin}), the learner's ${relationshipDe} (${ageGroup}). Be warm, patient, and supportive in everyday Mandarin conversations.`;
+  const speakingStyle =
+    input.speaking_style?.trim() ||
+    'Natural, clear, encouraging everyday Mandarin adapted to the learner level.';
+  const initialHook =
+    input.initial_hook?.trim() ||
+    `Frage ${nameHanzi} nach dem Alltag, aktuellen Plänen oder einem gemeinsamen Thema.`;
+
+  const existing = input.id ? getPersonaById(input.id, userId) : undefined;
+  const personaId =
+    existing?.id ||
+    input.id?.trim() ||
+    `person-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+
+  if (existing) {
+    db.prepare(`
+      UPDATE personas
+      SET name_hanzi = ?, name_pinyin = ?, relationship_de = ?, generation = ?,
+          age_group = ?, voice_name = ?, avatar_emoji = ?, personality_prompt = ?,
+          speaking_style = ?, initial_hook = ?
+      WHERE user_id = ? AND id = ?
+    `).run(
+      nameHanzi,
+      namePinyin,
+      relationshipDe,
+      generation,
+      ageGroup,
+      voiceName,
+      avatarEmoji,
+      personalityPrompt,
+      speakingStyle,
+      initialHook,
+      userId,
+      personaId
+    );
+  } else {
+    db.prepare(`
+      INSERT INTO personas (
+        user_id, id, name_hanzi, name_pinyin, relationship_de, generation,
+        age_group, voice_name, avatar_emoji, personality_prompt, speaking_style, initial_hook
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      userId,
+      personaId,
+      nameHanzi,
+      namePinyin,
+      relationshipDe,
+      generation,
+      ageGroup,
+      voiceName,
+      avatarEmoji,
+      personalityPrompt,
+      speakingStyle,
+      initialHook
+    );
+  }
+
+  return getPersonaById(personaId, userId)!;
+}
+
+/** Delete a persona and clean up dependent records; prevents deleting the last remaining persona. */
+export function deletePersona(personaId: string, userId = DEFAULT_USER_ID): { ok: boolean; error?: string } {
+  const all = getAllPersonas(userId);
+  const target = all.find((p) => p.id === personaId);
+  if (!target) {
+    return { ok: false, error: 'Person nicht gefunden.' };
+  }
+  if (all.length <= 1) {
+    return { ok: false, error: 'Mindestens ein Gesprächspartner muss erhalten bleiben.' };
+  }
+  const fallback = all.find((p) => p.id !== personaId)!;
+
+  const runDelete = db.transaction(() => {
+    db.prepare('DELETE FROM curriculum_scenarios WHERE user_id = ? AND persona_id = ?').run(
+      userId,
+      personaId
+    );
+    db.prepare('DELETE FROM persona_episodes WHERE user_id = ? AND persona_id = ?').run(
+      userId,
+      personaId
+    );
+    db.prepare('UPDATE sessions SET persona_id = ? WHERE user_id = ? AND persona_id = ?').run(
+      fallback.id,
+      userId,
+      personaId
+    );
+    db.prepare('DELETE FROM personas WHERE user_id = ? AND id = ?').run(userId, personaId);
+  });
+
+  runDelete();
+  return { ok: true };
 }
 
 export function getAllMemoryFacts(userId = DEFAULT_USER_ID) {

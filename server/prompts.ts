@@ -254,3 +254,123 @@ export const LIVE_TOOLS_DECLARATIONS: FunctionDeclaration[] = [
     },
   },
 ];
+
+export function buildOnboardingSystemPrompt(userId = DEFAULT_USER_ID): string {
+  const profile = getLearnerProfile(userId);
+  const personas = getAllPersonas(userId);
+  const personaList =
+    personas.length > 0
+      ? personas.map((p) => `- ${p.name_hanzi} (${p.name_pinyin}) — ${p.relationship_de}`).join('\n')
+      : '(noch keine)';
+
+  return `Du bist ein freundlicher, geduldiger deutscher Einrichtungs-Assistent für eine Chinesisch-Lern-App.
+
+DEINE AUFGABE:
+Hilf ${profile?.name || 'dem Nutzer'} in einem kurzen, lockeren Gespräch auf DEUTSCH dabei, das Profil und die persönlichen Gesprächspartner (Personas) einzurichten.
+
+WICHTIGE REGELN:
+1. Sprich ausschließlich DEUTSCH (sehr einfach, freundlich, ohne Fachjargon).
+2. Stelle immer nur EINE kurze Frage auf einmal (maximal 1–2 Sätze pro Antwort), damit es für unerfahrene Nutzer ganz leicht bleibt.
+3. Sobald der Nutzer Informationen nennt, speichere sie SOFORT mit den passenden Tools:
+   - Name, Sprachniveau (z. B. Anfänger, HSK 3, HSK 4) oder Lernziel/Alltag -> \`update_learner_profile\`
+   - Eine Person (z. B. Partner, Schwiegermutter, Kollege, Freund, Lehrer) -> \`add_or_update_person\`. Wenn der Nutzer keinen chinesischen Namen nennt, schlage selbst einen einfachen, leicht auszusprechenden chinesischen Namen mit Pinyin vor (z. B. 小明 Xiǎomíng, 林妈妈 Lín Māmā, 小安 Xiǎo-Ān, 王老师 Wáng Lǎoshī).
+   - Besondere Pläne, Orte (z. B. Taiwan, Peking) oder Hobbys -> \`save_environment_fact\`
+4. Wenn der Nutzer sagt, dass er fertig ist oder keine weiteren Personen mehr hat, rufe \`finish_onboarding\` auf und verabschiede dich herzlich.
+
+AKTUELLER STAND:
+- Name: ${profile?.name || 'Unbekannt'}
+- Niveau: ${profile?.level || 'HSK 3'}
+- Bisherige Personen:
+${personaList}
+
+ABLAUF (locker und flexibel):
+1. Begrüße den Nutzer kurz auf Deutsch und frage zuerst nach seinem Namen, seinem ungefähren Chinesisch-Stand (Anfänger oder schon Fortgeschritten) und wofür er Chinesisch lernen möchte.
+2. Frage danach, mit welchen Personen aus seinem Umfeld er gerne üben möchte (z. B. Familie, Freunde, Kollegen).
+3. Frage kurz, ob es noch ein wichtiges Thema oder eine geplante Reise gibt, und schließe dann mit \`finish_onboarding\` ab.`;
+}
+
+export const ONBOARDING_TOOLS_DECLARATIONS: FunctionDeclaration[] = [
+  {
+    name: 'update_learner_profile',
+    description:
+      'Update the learner profile with their preferred name, Mandarin level (e.g. "Anfänger (HSK 1-2)", "HSK 3", "HSK 4"), and a short German summary of their background/goals.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        name: { type: Type.STRING, description: 'Preferred first name of the learner.' },
+        level: { type: Type.STRING, description: 'Estimated Mandarin level, e.g. "HSK 1-2", "HSK 3", "HSK 4".' },
+        summary: { type: Type.STRING, description: 'Short German summary of the learner context and goals.' },
+      },
+    },
+  },
+  {
+    name: 'add_or_update_person',
+    description:
+      'Add a new conversation partner (persona) to the learner workspace based on what the user described in German.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        name_hanzi: {
+          type: Type.STRING,
+          description: 'Simple Chinese name in Simplified Hanzi (e.g. "林妈妈", "表哥小明", "王老师").',
+        },
+        name_pinyin: {
+          type: Type.STRING,
+          description: 'Pinyin with tone marks for the Chinese name (e.g. "Lín Māmā", "Biǎogē Xiǎomíng").',
+        },
+        relationship_de: {
+          type: Type.STRING,
+          description: 'Short German description of the relationship (e.g. "Schwiegermutter", "Guter Freund", "Kollegin").',
+        },
+        age_group: {
+          type: Type.STRING,
+          description: 'Approximate age or generation in German (e.g. "ca. 60 Jahre", "ca. 30 Jahre").',
+        },
+        voice_name: {
+          type: Type.STRING,
+          description: 'Voice name: "Aoede" or "Kore" for female, "Puck" or "Charon" for male.',
+        },
+        avatar_emoji: {
+          type: Type.STRING,
+          description: 'A single fitting emoji such as 👩🏻, 👨🏻, 👵🏻, 👴🏻, 👧🏻, 👦🏻, 🧑‍🏫, 🧑.',
+        },
+        personality_prompt: {
+          type: Type.STRING,
+          description: 'Short English roleplay prompt describing this person and what they like to talk about.',
+        },
+      },
+      required: ['name_hanzi', 'name_pinyin', 'relationship_de'],
+    },
+  },
+  {
+    name: 'save_environment_fact',
+    description: 'Save a background fact about the learner environment, travel plans, or preferences.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        category: {
+          type: Type.STRING,
+          description: 'One of: "family", "travel_plans", "germany_life", "preferences", "past_trips".',
+        },
+        fact: {
+          type: Type.STRING,
+          description: 'Short, clear German fact statement.',
+        },
+      },
+      required: ['category', 'fact'],
+    },
+  },
+  {
+    name: 'finish_onboarding',
+    description: 'Call this when the user is done setting up their profile and people.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        summary_de: {
+          type: Type.STRING,
+          description: 'Short friendly German confirmation of what was set up.',
+        },
+      },
+    },
+  },
+];
