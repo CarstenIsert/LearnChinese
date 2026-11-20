@@ -1,0 +1,22 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: learnchinese-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 6889
+    volumes:
+      - ./data:/app/data
+    expose:
+      - "6889"
+    networks:
+      - learnchinese_net
+
+networks:
+  learnchinese_net:
+    external: true
