@@ -56,6 +56,10 @@ export default function App() {
 
   // Live Vocab Popups & Blurred Transcript
   const [liveVocabPopups, setLiveVocabPopups] = useState<VocabularyWord[]>([]);
+  const [vocabQuizWords, setVocabQuizWords] = useState<VocabularyWord[]>([]);
+  const [vocabQuizReviewed, setVocabQuizReviewed] = useState<
+    Record<string, 'used_actively' | 'recognized' | 'forgotten'>
+  >({});
   const [transcriptTurns, setTranscriptTurns] = useState<TranscriptTurn[]>([]);
   const [liveDraftUser, setLiveDraftUser] = useState<string>('');
   const [liveDraftAi, setLiveDraftAi] = useState<string>('');
@@ -194,14 +198,26 @@ export default function App() {
   });
 
   const startCall = useCallback(
-    async (personaIdOverride?: string, scenarioIdOverride?: string) => {
+    async (
+      personaIdOverride?: string,
+      scenarioIdOverride?: string,
+      vocabQuizOverride?: VocabularyWord[]
+    ) => {
       cancelPendingTopicFetch();
       const targetPersonaId = personaIdOverride || selectedPersonaId || data?.personas[0]?.id || '';
+      const activeQuizWords =
+        vocabQuizOverride && vocabQuizOverride.length > 0 ? vocabQuizOverride.slice(0, 15) : [];
       const targetScenarioId =
-        scenarioIdOverride !== undefined ? scenarioIdOverride : selectedScenarioId;
+        activeQuizWords.length > 0
+          ? ''
+          : scenarioIdOverride !== undefined
+          ? scenarioIdOverride
+          : selectedScenarioId;
 
       setSelectedPersonaId(targetPersonaId);
       setSelectedScenarioId(targetScenarioId);
+      setVocabQuizWords(activeQuizWords);
+      setVocabQuizReviewed({});
       setActiveTab('talk');
       setErrorMessage('');
       setTranscriptTurns([]);
@@ -248,7 +264,15 @@ export default function App() {
               type: 'start_session',
               personaId: targetPersonaId,
               scenarioId: targetScenarioId || undefined,
-              topic: targetScenarioId ? undefined : suggestedTopic,
+              topic: targetScenarioId || activeQuizWords.length > 0 ? undefined : suggestedTopic,
+              vocabQuizWords:
+                activeQuizWords.length > 0
+                  ? activeQuizWords.map((w) => ({
+                      simplified_hanzi: w.simplified_hanzi,
+                      pinyin: w.pinyin,
+                      german: w.german,
+                    }))
+                  : undefined,
               enableToneAnalysis,
             })
           );
@@ -286,6 +310,10 @@ export default function App() {
             });
             fetchBootstrap();
           } else if (msg.type === 'vocab_review_recorded') {
+            setVocabQuizReviewed((prev) => ({
+              ...prev,
+              [msg.simplified_hanzi]: msg.outcome,
+            }));
             showToast(
               `Vokabel: ${msg.simplified_hanzi} (${
                 msg.outcome === 'used_actively'
@@ -634,6 +662,8 @@ export default function App() {
             aiSpeaking={aiSpeaking}
             liveVocabPopups={liveVocabPopups}
             dueVocabulary={data.dueVocabulary}
+            vocabQuizWords={vocabQuizWords}
+            vocabQuizReviewed={vocabQuizReviewed}
             transcriptTurns={transcriptTurns}
             liveDraftUser={liveDraftUser}
             liveDraftAi={liveDraftAi}
@@ -661,6 +691,7 @@ export default function App() {
             dueCount={data.dueVocabulary.length}
             onAddVocabulary={handleAddVocabulary}
             onReviewVocabulary={handleManualVocabReview}
+            onStartVocabQuiz={(words) => startCall(undefined, '', words)}
           />
         )}
 

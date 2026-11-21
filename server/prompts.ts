@@ -14,11 +14,18 @@ import {
   getScenarioById,
 } from './db.ts';
 
+export interface VocabQuizTarget {
+  simplified_hanzi: string;
+  pinyin: string;
+  german: string;
+}
+
 export function buildSystemPrompt(
   personaId: string,
   scenarioId?: string,
   customTopic?: string,
-  userId = DEFAULT_USER_ID
+  userId = DEFAULT_USER_ID,
+  vocabQuizWords?: VocabQuizTarget[]
 ) {
   const profile = getLearnerProfile(userId);
   const fallbackPersona = getAllPersonas(userId)[0];
@@ -95,7 +102,29 @@ export function buildSystemPrompt(
           .join('\n')
       : '- None due right now.';
 
-  const scenarioBlock = scenario
+  const hasVocabQuiz = Boolean(vocabQuizWords && vocabQuizWords.length > 0);
+  const scenarioBlock = hasVocabQuiz
+    ? `## TODAY'S INTERACTIVE VOCABULARY QUIZ MODE (CRITICAL)
+You are running an interactive spoken vocabulary quiz & sentence-building session with ${profile.name}.
+Here are the **${vocabQuizWords!.length} target vocabulary words** to practice one by one:
+${vocabQuizWords!
+  .map(
+    (w, idx) =>
+      `${idx + 1}. ${w.simplified_hanzi} (${w.pinyin}) = "${w.german}"`
+  )
+  .join('\n')}
+
+### HOW TO RUN THIS QUIZ:
+1. **One word at a time:** Go through the list word by word. Never ask about two words in the same turn.
+2. **Ask for word + example sentence:**
+   - Give the German meaning (e.g., *"Wie sagt man ‚${vocabQuizWords![0].german}‘ auf Chinesisch? Und kannst du einen kurzen Satz damit sagen?"*) or ask a simple question that invites them to use the word.
+   - If ${profile.name} only says the single word, praise them briefly and ask them to **use it in a short Chinese sentence** (e.g., *"Sehr gut! Und jetzt sag mir bitte einen kurzen Satz mit diesem Wort."*).
+3. **Coach & record SRS outcome:**
+   - If ${profile.name} forgets or struggles: give a gentle hint first; if still stuck, tell them the Mandarin word clearly, explain briefly in German, call \`record_vocab_review\` with \`outcome: "forgotten"\`, and ask them to repeat one short example sentence.
+   - If ${profile.name} uses the word in a sentence: give warm, concise feedback on tones or grammar if needed (have them repeat once if there was a clear mistake), call \`record_vocab_review\` with \`outcome: "used_actively"\` (or \`"recognized"\` if they needed a hint), and then **immediately introduce the next word** on the list!
+4. **Keep it brisk and encouraging:** Mix warm German guidance for quiz prompts/explanations with clear Mandarin for example sentences and corrections.
+5. **When all ${vocabQuizWords!.length} words are finished:** Congratulate ${profile.name} warmly, summarize 1–2 words they did great on, and ask if they want to chat freely.`
+    : scenario
     ? `## TODAY'S SCENARIO & GOAL
 - **Scenario:** ${scenario.title_de} (${scenario.title_hanzi})
 - **Situation:** ${scenario.description_de}

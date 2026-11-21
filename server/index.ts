@@ -216,7 +216,7 @@ app.get('/api/bootstrap', async (req, res) => {
   const memoryFacts = getAllMemoryFacts(userId);
   const recentEpisodes = getRecentFamilyEpisodesAcrossAll(8, userId);
   const skills = getLearnerSkills(userId);
-  const dueVocabulary = getDueVocabulary(8, userId);
+  const dueVocabulary = getDueVocabulary(25, userId);
   const allVocabulary = getAllVocabulary(userId);
   const recentSessions = getRecentSessions(userId, 10);
 
@@ -287,6 +287,7 @@ app.post('/api/curriculum/expand', async (req, res) => {
 
 app.get('/api/tts', async (req, res) => {
   const rawText = typeof req.query.text === 'string' ? req.query.text.trim() : '';
+  const forceRefresh = req.query.refresh === '1' || req.query.refresh === 'true';
   if (!rawText || rawText.length > 200) {
     res.status(400).json({ error: 'Text must be between 1 and 200 characters' });
     return;
@@ -296,9 +297,9 @@ app.get('/api/tts', async (req, res) => {
   const cacheKey = crypto.createHash('sha256').update(`v2:${voiceName}:${rawText}`).digest('hex');
   const cacheFile = path.join(TTS_CACHE_DIR, `${cacheKey}.wav`);
 
-  if (fs.existsSync(cacheFile)) {
+  if (!forceRefresh && fs.existsSync(cacheFile)) {
     res.setHeader('Content-Type', 'audio/wav');
-    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('Cache-Control', 'no-cache');
     res.sendFile(cacheFile);
     return;
   }
@@ -319,7 +320,7 @@ app.get('/api/tts', async (req, res) => {
     fs.writeFileSync(cacheFile, wavBuffer);
 
     res.setHeader('Content-Type', 'audio/wav');
-    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('Cache-Control', forceRefresh ? 'no-store' : 'no-cache');
     res.send(wavBuffer);
   } catch (err: any) {
     console.error('Gemini TTS error:', err);
@@ -518,7 +519,7 @@ app.post('/api/vocabulary', (req, res) => {
   res.json({
     word: saved,
     allVocabulary: getAllVocabulary(userId),
-    dueVocabulary: getDueVocabulary(8, userId),
+    dueVocabulary: getDueVocabulary(25, userId),
   });
 });
 
@@ -532,7 +533,7 @@ app.post('/api/vocabulary/review', (req, res) => {
   res.json({
     word: updated,
     allVocabulary: getAllVocabulary(userId),
-    dueVocabulary: getDueVocabulary(8, userId),
+    dueVocabulary: getDueVocabulary(25, userId),
   });
 });
 
@@ -698,13 +699,30 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
           currentPersonaId = msg.personaId || fallbackPersona.id;
           currentScenarioId = msg.scenarioId || undefined;
           const customTopic = msg.topic ? String(msg.topic) : undefined;
+          const vocabQuizWords = Array.isArray(msg.vocabQuizWords)
+            ? msg.vocabQuizWords
+                .filter(
+                  (w: any) =>
+                    w &&
+                    typeof w.simplified_hanzi === 'string' &&
+                    typeof w.german === 'string'
+                )
+                .slice(0, 15)
+                .map((w: any) => ({
+                  simplified_hanzi: String(w.simplified_hanzi).trim(),
+                  pinyin: String(w.pinyin || '').trim(),
+                  german: String(w.german).trim(),
+                }))
+            : undefined;
+          const hasVocabQuiz = Boolean(vocabQuizWords && vocabQuizWords.length > 0);
           const persona = getPersonaById(currentPersonaId, userId) ?? fallbackPersona;
           voiceName = persona.voice_name;
           systemInstruction = buildSystemPrompt(
             currentPersonaId,
             currentScenarioId,
             customTopic,
-            userId
+            userId,
+            vocabQuizWords
           );
           currentSessionDbId = createSessionRecord(currentPersonaId, currentScenarioId ?? null, userId);
           sessionStartMs = Date.now();
@@ -712,8 +730,12 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
           const openingTopicNote = customTopic
             ? `Schlage zum Einstieg locker dieses Gesprächsthema vor: "${customTopic}".`
             : 'Stelle eine einfache, natürliche Einstiegsfrage.';
-          statusText = `Verbinde mit ${persona.name_hanzi} (${LIVE_MODEL})...`;
-          greetingText = `(System: Das Gespräch hat begonnen. Begrüße ${getLearnerProfile(userId).name} herzlich auf Chinesisch in deiner Rolle als ${persona.name_hanzi}. ${openingTopicNote})`;
+          statusText = hasVocabQuiz
+            ? `Starte Vokabel-Quiz mit ${persona.name_hanzi} (${vocabQuizWords!.length} Wörter)...`
+            : `Verbinde mit ${persona.name_hanzi} (${LIVE_MODEL})...`;
+          greetingText = hasVocabQuiz
+            ? `(System: Das interaktive Vokabel-Quiz beginnt! Begrüße ${getLearnerProfile(userId).name} kurz und freundlich als ${persona.name_hanzi} und starte direkt mit dem 1. Wort der Liste („${vocabQuizWords![0].german}“): Frage nach dem chinesischen Wort und einem kurzen Beispielsatz damit.)`
+            : `(System: Das Gespräch hat begonnen. Begrüße ${getLearnerProfile(userId).name} herzlich auf Chinesisch in deiner Rolle als ${persona.name_hanzi}. ${openingTopicNote})`;
         }
 
         userSpeechChunks.length = 0;

@@ -783,6 +783,19 @@ button:disabled {
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
 }
 
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .pronunciation-result-card {
   width: 100%;
   max-inline-size: 520px;

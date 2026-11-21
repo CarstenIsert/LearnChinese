@@ -34,6 +34,8 @@ interface FreeTalkViewProps {
   aiSpeaking: boolean;
   liveVocabPopups: VocabularyWord[];
   dueVocabulary: VocabularyWord[];
+  vocabQuizWords?: VocabularyWord[];
+  vocabQuizReviewed?: Record<string, 'used_actively' | 'recognized' | 'forgotten'>;
   transcriptTurns: TranscriptTurn[];
   liveDraftUser: string;
   liveDraftAi: string;
@@ -64,6 +66,8 @@ export function FreeTalkView({
   aiSpeaking,
   liveVocabPopups,
   dueVocabulary,
+  vocabQuizWords = [],
+  vocabQuizReviewed = {},
   transcriptTurns,
   liveDraftUser,
   liveDraftAi,
@@ -209,10 +213,55 @@ export function FreeTalkView({
               {callState === 'in_call' && enableToneAnalysis && (
                 <span className="badge badge-emerald">Ton-Analyse aktiv</span>
               )}
+              {vocabQuizWords.length > 0 && (
+                <span className="badge badge-gold">
+                  Vokabel-Quiz:{' '}
+                  {vocabQuizWords.filter((w) => Boolean(vocabQuizReviewed[w.simplified_hanzi])).length}{' '}
+                  / {vocabQuizWords.length}
+                </span>
+              )}
               <p style={{ margin: 0, color: 'var(--accent)', fontSize: '0.92rem' }}>
                 {statusMessage}
               </p>
             </div>
+
+            {vocabQuizWords.length > 0 && (
+              <div
+                style={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  justifyContent: 'center',
+                  gap: '0.4rem',
+                  marginBlock: '0.5rem',
+                  maxInlineSize: 640,
+                }}
+              >
+                {vocabQuizWords.map((w) => {
+                  const outcome = vocabQuizReviewed[w.simplified_hanzi];
+                  const badgeClass =
+                    outcome === 'used_actively'
+                      ? 'badge-emerald'
+                      : outcome === 'recognized'
+                      ? 'badge-gold'
+                      : outcome === 'forgotten'
+                      ? 'badge-amber'
+                      : '';
+                  return (
+                    <span
+                      key={w.id}
+                      className={`badge ${badgeClass}`}
+                      style={{
+                        opacity: outcome ? 0.9 : 0.78,
+                        textDecoration: outcome === 'used_actively' ? 'line-through' : undefined,
+                      }}
+                      title={`${w.simplified_hanzi} (${w.pinyin})`}
+                    >
+                      {w.german}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
 
             {callState === 'in_call' && (
               <div className="call-controls-dock">

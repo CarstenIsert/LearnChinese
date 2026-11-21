@@ -22,3 +22,18 @@ All AI coding assistants and contributors MUST follow these rules strictly:
   - Provides current/seasonal topic generation (`POST /api/topics/suggest`) and progressive HSK 3 & HSK 4 curriculum expansion (`POST /api/curriculum/expand`) via `server/curriculum.ts`.
   - Runs a Post-Session Reflection pipeline (`gemini-3.8-flash`) after each call to extract new semantic facts, episodic relationship hooks, grammar/skill observations, SRS vocabulary review updates, and automatic curriculum progression.
 - **Database:** Local SQLite (`better-sqlite3`) stored at `data/tutor.db`.
+
+## Server Deployment & Data Migration
+- **SSH Access:** `ssh myhetzner` (logs in as `carsten`).
+- **Server Repository & Docker:** Checked out at `~/LearnChinese` and running via `docker compose` (`docker-compose.yml`, container name `learnchinese-app`, mounting `./data:/app/data`).
+- **Migrating Learning Data (Local -> Server):**
+  1. Create a clean, WAL-checkpointed backup of the local SQLite database:
+     ```bash
+     sqlite3 data/tutor.db ".backup /tmp/local_tutor_export.db"
+     ```
+  2. Copy the export and `scripts/import-learning-data.mjs` to the server and into the container, then run the import:
+     ```bash
+     scp /tmp/local_tutor_export.db scripts/import-learning-data.mjs myhetzner:/tmp/
+     ssh myhetzner "docker cp /tmp/local_tutor_export.db learnchinese-app:/tmp/local_tutor_export.db && docker cp /tmp/import-learning-data.mjs learnchinese-app:/tmp/import-learning-data.mjs && docker exec learnchinese-app node /tmp/import-learning-data.mjs --source /tmp/local_tutor_export.db --target /app/data/tutor.db && docker exec learnchinese-app rm -f /tmp/local_tutor_export.db /tmp/import-learning-data.mjs && rm -f /tmp/local_tutor_export.db /tmp/import-learning-data.mjs && cd ~/LearnChinese && docker compose restart app"
+     ```
+  - `scripts/import-learning-data.mjs` creates a timestamped backup of `/app/data/tutor.db` before importing, preserves the server's `users`, `auth_sessions`, and `invite_codes` tables, and replaces only the learning data (`learner_profile`, `personas`, `memory_facts`, `learner_skill_memory`, `vocabulary`, `curriculum_scenarios`, `sessions`, and `persona_episodes`) for the target user.

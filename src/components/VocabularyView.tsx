@@ -5,7 +5,9 @@ import {
   GraduationCap,
   List,
   Mic,
+  PhoneCall,
   Plus,
+  RefreshCw,
   RotateCcw,
   Shuffle,
   Square,
@@ -29,17 +31,40 @@ interface VocabularyViewProps {
     simplifiedHanzi: string,
     outcome: 'used_actively' | 'recognized' | 'forgotten'
   ) => Promise<void>;
+  onStartVocabQuiz?: (words: VocabularyWord[]) => void;
 }
 
 type VocabMode = 'trainer' | 'list';
-type DeckFilter = 'due' | 'all' | 'struggling';
+type DeckFilter = 'due' | 'weak_random' | 'struggling' | 'all';
 type CardDirection = 'zh-to-de' | 'de-to-zh';
 
 let activeAudio: HTMLAudioElement | null = null;
+const audioVersionMap = new Map<string, number>();
+
+function pickWeakRandomWords(words: VocabularyWord[], count: number): VocabularyWord[] {
+  if (words.length === 0) return [];
+  const scored = words.map((w) => {
+    // Strongly favor words with low streak, low stability, and few active uses
+    const streakPenalty = w.streak * 2.5;
+    const activePenalty = w.times_used_actively * 0.6;
+    const stabilityPenalty = w.stability * 0.15;
+    const zeroStreakBoost = w.streak === 0 ? 2.0 : 1.0;
+    const weight = Math.max(
+      0.01,
+      zeroStreakBoost / (1 + streakPenalty + activePenalty + stabilityPenalty)
+    );
+    // Efraimidis-Spirakis weighted random sampling without replacement
+    const key = Math.pow(Math.random() || 1e-9, 1 / weight);
+    return { word: w, key };
+  });
+  scored.sort((a, b) => b.key - a.key);
+  return scored.slice(0, Math.min(count, scored.length)).map((item) => item.word);
+}
 
 async function speakMandarin(
   text: string,
-  onStateChange?: (loading: boolean) => void
+  onStateChange?: (loading: boolean) => void,
+  options?: { forceRefresh?: boolean; onRegeneratingChange?: (regenerating: boolean) => void }
 ) {
   const cleanText = text.replace(/\(.*?\)|（.*?）/g, '').trim();
   if (!cleanText) return;
@@ -50,9 +75,19 @@ async function speakMandarin(
     activeAudio = null;
   }
 
+  const forceRefresh = Boolean(options?.forceRefresh);
+  if (forceRefresh) {
+    audioVersionMap.set(cleanText, Date.now());
+  }
+  const version = audioVersionMap.get(cleanText);
+
   try {
     onStateChange?.(true);
-    const url = `/api/tts?text=${encodeURIComponent(cleanText)}`;
+    if (forceRefresh) options?.onRegeneratingChange?.(true);
+    const params = new URLSearchParams({ text: cleanText });
+    if (forceRefresh) params.set('refresh', '1');
+    if (version) params.set('v', String(version));
+    const url = `/api/tts?${params.toString()}`;
     const audio = new Audio(url);
     activeAudio = audio;
     audio.onended = () => {
@@ -62,10 +97,13 @@ async function speakMandarin(
     audio.onerror = () => {
       if (activeAudio === audio) activeAudio = null;
       onStateChange?.(false);
+      if (forceRefresh) options?.onRegeneratingChange?.(false);
     };
     await audio.play();
   } catch {
     onStateChange?.(false);
+  } finally {
+    if (forceRefresh) options?.onRegeneratingChange?.(false);
   }
 }
 
@@ -75,6 +113,7 @@ export function VocabularyView({
   dueCount,
   onAddVocabulary,
   onReviewVocabulary,
+  onStartVocabQuiz,
 }: VocabularyViewProps) {
   const [mode, setMode] = useState<VocabMode>('trainer');
   const [deckFilter, setDeckFilter] = useState<DeckFilter>(
@@ -86,6 +125,7 @@ export function VocabularyView({
   const [cardIndex, setCardIndex] = useState<number>(0);
   const [isRevealed, setIsRevealed] = useState<boolean>(false);
   const [isAudioPlaying, setIsAudioPlaying] = useState<boolean>(false);
+  const [regeneratingTarget, setRegeneratingTarget] = useState<'word' | 'example' | null>(null);
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [isCheckingPronunciation, setIsCheckingPronunciation] = useState<boolean>(false);
   const [pronunciationResult, setPronunciationResult] = useState<PronunciationResult | null>(null);
@@ -93,6 +133,8 @@ export function VocabularyView({
   const [sessionCompleted, setSessionCompleted] = useState<number>(0);
   const [sessionKnown, setSessionKnown] = useState<number>(0);
   const [shuffleSeed, setShuffleSeed] = useState<number>(0);
+  const [weakRandomSeed, setWeakRandomSeed] = useState<number>(1);
+  const [weakBatchSize, setWeakBatchSize] = useState<number>(20);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -123,21 +165,35 @@ export function VocabularyView({
   const [newVocabPinyin, setNewVocabPinyin] = useState<string>('');
   const [newVocabGerman, setNewVocabGerman] = useState<string>('');
 
+  const allVocabularyRef = useRef(allVocabulary);
+  allVocabularyRef.current = allVocabulary;
+
+  const weakRandomIds = useMemo(() => {
+    return pickWeakRandomWords(allVocabularyRef.current, weakBatchSize).map((w) => w.id);
+    // Re-draw only when switching to/refreshing weak_random, changing batch size, or vocab count changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weakRandomSeed, weakBatchSize, allVocabulary.length]);
+
   const trainerDeck = useMemo(() => {
     let base: VocabularyWord[];
     if (deckFilter === 'due') {
       base = dueVocabulary.length > 0 ? [...dueVocabulary] : [];
+    } else if (deckFilter === 'weak_random') {
+      const byId = new Map(allVocabulary.map((w) => [w.id, w]));
+      base = weakRandomIds
+        .map((id) => byId.get(id))
+        .filter((w): w is VocabularyWord => Boolean(w));
     } else if (deckFilter === 'struggling') {
       base = allVocabulary.filter((w) => w.streak === 0);
     } else {
       base = [...allVocabulary];
     }
 
-    if (shuffleSeed > 0) {
+    if (shuffleSeed > 0 && deckFilter !== 'weak_random') {
       base = [...base].sort(() => Math.random() - 0.5);
     }
     return base;
-  }, [allVocabulary, deckFilter, dueVocabulary, shuffleSeed]);
+  }, [allVocabulary, deckFilter, dueVocabulary, shuffleSeed, weakRandomIds]);
 
   const currentCard = trainerDeck[cardIndex] || null;
   const isDeckDone = trainerDeck.length > 0 && cardIndex >= trainerDeck.length;
@@ -329,6 +385,16 @@ export function VocabularyView({
               </button>
               <button
                 type="button"
+                className={`partner-pill ${deckFilter === 'weak_random' ? 'active' : ''}`}
+                onClick={() => {
+                  setWeakRandomSeed((s) => s + 1);
+                  resetTrainer('weak_random');
+                }}
+              >
+                Zufällig (noch unsicher)
+              </button>
+              <button
+                type="button"
                 className={`partner-pill ${deckFilter === 'struggling' ? 'active' : ''}`}
                 onClick={() => resetTrainer('struggling')}
               >
@@ -342,6 +408,24 @@ export function VocabularyView({
                 Alle ({allVocabulary.length})
               </button>
             </div>
+
+            {deckFilter === 'weak_random' && (
+              <div className="partner-pills" role="group" aria-label="Anzahl Karten">
+                {[10, 20, 30].map((size) => (
+                  <button
+                    key={size}
+                    type="button"
+                    className={`partner-pill ${weakBatchSize === size ? 'active' : ''}`}
+                    onClick={() => {
+                      setWeakBatchSize(size);
+                      resetTrainer('weak_random');
+                    }}
+                  >
+                    {size} Wörter
+                  </button>
+                ))}
+              </div>
+            )}
 
             <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap' }}>
               <button
@@ -377,12 +461,32 @@ export function VocabularyView({
                 type="button"
                 className="partner-pill"
                 onClick={() => {
-                  setShuffleSeed((s) => s + 1);
+                  if (deckFilter === 'weak_random') {
+                    setWeakRandomSeed((s) => s + 1);
+                  } else {
+                    setShuffleSeed((s) => s + 1);
+                  }
                   resetTrainer();
                 }}
               >
-                <Shuffle size={14} aria-hidden="true" /> Mischen
+                <Shuffle size={14} aria-hidden="true" />{' '}
+                {deckFilter === 'weak_random' ? 'Neue Auswahl' : 'Mischen'}
               </button>
+              {onStartVocabQuiz && trainerDeck.length > 0 && (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  style={{ padding: '0.35rem 0.8rem', fontSize: '0.82rem' }}
+                  onClick={() => {
+                    const startIdx = cardIndex < trainerDeck.length ? cardIndex : 0;
+                    const quizSlice = trainerDeck.slice(startIdx, startIdx + 10);
+                    onStartVocabQuiz(quizSlice.length > 0 ? quizSlice : trainerDeck.slice(0, 10));
+                  }}
+                  title="Die nächsten bis zu 10 Wörter dieser Auswahl im Live-Gespräch abfragen lassen"
+                >
+                  <PhoneCall size={14} aria-hidden="true" /> Mit Lehrerin üben
+                </button>
+              )}
             </div>
           </div>
 
@@ -399,9 +503,19 @@ export function VocabularyView({
               <p style={{ color: 'var(--text-muted)' }}>
                 Du hast {sessionCompleted} Karten geübt ({sessionKnown} sicher erkannt/gewusst).
               </p>
-              <div style={{ display: 'flex', gap: '0.6rem', justifyContent: 'center' }}>
-                <button type="button" className="btn-primary" onClick={() => resetTrainer()}>
-                  <RotateCcw size={15} aria-hidden="true" /> Nochmal üben
+              <div style={{ display: 'flex', gap: '0.6rem', justifyContent: 'center', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => {
+                    if (deckFilter === 'weak_random') {
+                      setWeakRandomSeed((s) => s + 1);
+                    }
+                    resetTrainer();
+                  }}
+                >
+                  <RotateCcw size={15} aria-hidden="true" />{' '}
+                  {deckFilter === 'weak_random' ? 'Nächste Zufallsrunde' : 'Nochmal üben'}
                 </button>
                 <button type="button" onClick={() => resetTrainer('all')}>
                   Alle Vokabeln durchsehen
@@ -443,6 +557,27 @@ export function VocabularyView({
                   >
                     <Volume2 size={22} aria-hidden="true" />
                     {isAudioPlaying ? 'Spielt ab...' : 'Anhören'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    style={{ padding: '0.65rem 0.85rem', borderRadius: '14px' }}
+                    disabled={regeneratingTarget === 'word'}
+                    onClick={() =>
+                      speakMandarin(currentCard.simplified_hanzi, setIsAudioPlaying, {
+                        forceRefresh: true,
+                        onRegeneratingChange: (loading) =>
+                          setRegeneratingTarget(loading ? 'word' : null),
+                      })
+                    }
+                    title="Audio neu generieren (falls fehlerhaft oder abgeschnitten)"
+                    aria-label="Audio neu generieren"
+                  >
+                    <RefreshCw
+                      size={18}
+                      className={regeneratingTarget === 'word' ? 'spin' : undefined}
+                      aria-hidden="true"
+                    />
                   </button>
 
                   {voiceMode && (
@@ -532,6 +667,27 @@ export function VocabularyView({
                             title="Beispielsatz vorlesen"
                           >
                             <Volume2 size={13} aria-hidden="true" />
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-back-home"
+                            style={{ padding: '0.15rem 0.45rem', fontSize: '0.75rem' }}
+                            disabled={regeneratingTarget === 'example'}
+                            onClick={() =>
+                              speakMandarin(currentCard.example_hanzi!, setIsAudioPlaying, {
+                                forceRefresh: true,
+                                onRegeneratingChange: (loading) =>
+                                  setRegeneratingTarget(loading ? 'example' : null),
+                              })
+                            }
+                            title="Beispielsatz-Audio neu generieren"
+                            aria-label="Beispielsatz-Audio neu generieren"
+                          >
+                            <RefreshCw
+                              size={12}
+                              className={regeneratingTarget === 'example' ? 'spin' : undefined}
+                              aria-hidden="true"
+                            />
                           </button>
                         </div>
                         {currentCard.example_pinyin && <div>{currentCard.example_pinyin}</div>}
