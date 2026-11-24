@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 import { Router } from 'express';
 import type http from 'node:http';
-import { db, seedUserWorkspace } from './db.ts';
+import { db, deleteUserAccount, seedUserWorkspace } from './db.ts';
 
 export const SESSION_COOKIE_NAME = 'lc_session';
 const SESSION_TTL_DAYS = 30;
@@ -177,10 +177,58 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction): v
   next();
 }
 
-// Simple in-memory rate limiter for auth endpoints
+// Simple in-memory rate limiter for auth and AI endpoints
 const authRateMap = new Map<string, { count: number; resetAt: number }>();
 const AUTH_WINDOW_MS = 15 * 60 * 1000;
 const AUTH_MAX_ATTEMPTS = 25;
+
+export function createInMemoryRateLimiter(options: {
+  windowMs: number;
+  maxRequests: number;
+  errorMessage?: string;
+}) {
+  const hits = new Map<string, { count: number; resetAt: number }>();
+
+  return {
+    check(key: string): { allowed: boolean; retryAfterSeconds?: number } {
+      const now = Date.now();
+      if (hits.size > 2000) {
+        for (const [k, entry] of hits.entries()) {
+          if (entry.resetAt <= now) hits.delete(k);
+        }
+      }
+      const existing = hits.get(key);
+      if (!existing || existing.resetAt <= now) {
+        hits.set(key, { count: 1, resetAt: now + options.windowMs });
+        return { allowed: true };
+      }
+      if (existing.count >= options.maxRequests) {
+        return {
+          allowed: false,
+          retryAfterSeconds: Math.max(1, Math.ceil((existing.resetAt - now) / 1000)),
+        };
+      }
+      existing.count += 1;
+      return { allowed: true };
+    },
+    middleware(req: Request, res: Response, next: NextFunction): void {
+      const key = req.user ? `user:${req.user.id}` : `ip:${req.ip || req.socket.remoteAddress || 'unknown'}`;
+      const result = this.check(key);
+      if (!result.allowed) {
+        if (result.retryAfterSeconds) {
+          res.setHeader('Retry-After', String(result.retryAfterSeconds));
+        }
+        res.status(429).json({
+          error:
+            options.errorMessage ||
+            'Zu viele Anfragen. Bitte warte kurz und versuche es gleich noch einmal.',
+        });
+        return;
+      }
+      next();
+    },
+  };
+}
 
 function authRateLimit(req: Request, res: Response, next: NextFunction): void {
   const ip = req.ip || req.socket.remoteAddress || 'unknown';
@@ -212,7 +260,13 @@ function authRateLimit(req: Request, res: Response, next: NextFunction): void {
 }
 
 const registerUserTx = db.transaction(
-  (input: { email: string; password: string; displayName: string; inviteCode?: string }) => {
+  (input: {
+    email: string;
+    password: string;
+    displayName: string;
+    inviteCode?: string;
+    bootstrapToken?: string;
+  }) => {
     const email = normalizeEmail(input.email);
     const existingUser = db.prepare(`SELECT id FROM users WHERE email = ?`).get(email);
     if (existingUser) {
@@ -223,7 +277,17 @@ const registerUserTx = db.transaction(
     const isFirstUser = userCount === 0;
     const role: 'admin' | 'user' = isFirstUser ? 'admin' : 'user';
 
-    if (!isFirstUser) {
+    if (isFirstUser) {
+      const expectedBootstrap = (process.env.ADMIN_BOOTSTRAP_TOKEN || '').trim();
+      if (expectedBootstrap) {
+        const provided = (input.bootstrapToken || input.inviteCode || '').trim();
+        const a = Buffer.from(provided);
+        const b = Buffer.from(expectedBootstrap);
+        if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+          throw Object.assign(new Error('Invalid admin bootstrap token.'), { status: 403 });
+        }
+      }
+    } else {
       const code = input.inviteCode?.trim();
       if (!code) {
         throw Object.assign(new Error('An invite code is required to register.'), { status: 403 });
@@ -296,11 +360,12 @@ export function createAuthRouter(): Router {
   });
 
   router.post('/register', authRateLimit, (req, res) => {
-    const { email, password, displayName, inviteCode } = req.body as {
+    const { email, password, displayName, inviteCode, bootstrapToken } = req.body as {
       email?: string;
       password?: string;
       displayName?: string;
       inviteCode?: string;
+      bootstrapToken?: string;
     };
 
     const trimmedName = displayName?.trim() || '';
@@ -327,6 +392,7 @@ export function createAuthRouter(): Router {
         password,
         displayName: trimmedName,
         inviteCode,
+        bootstrapToken,
       });
       const token = createAuthSession(created.id);
       setSessionCookie(res, token, req);
@@ -393,6 +459,32 @@ export function createAuthRouter(): Router {
     if (token) {
       deleteAuthSessionByToken(token);
     }
+    clearSessionCookie(res, req);
+    res.json({ ok: true });
+  });
+
+  router.delete('/account', requireAuth, (req, res) => {
+    const { password } = (req.body || {}) as { password?: string };
+    if (!password || typeof password !== 'string') {
+      res.status(400).json({ error: 'Bitte gib zur Bestätigung dein Passwort ein.' });
+      return;
+    }
+
+    const row = db
+      .prepare(`SELECT id, password_hash FROM users WHERE id = ?`)
+      .get(req.user!.id) as { id: number; password_hash: string } | undefined;
+
+    if (!row || !verifyPassword(password, row.password_hash)) {
+      res.status(401).json({ error: 'Passwort ist nicht korrekt.' });
+      return;
+    }
+
+    const result = deleteUserAccount(req.user!.id);
+    if (!result.ok) {
+      res.status(400).json({ error: result.error || 'Konto konnte nicht gelöscht werden.' });
+      return;
+    }
+
     clearSessionCookie(res, req);
     res.json({ ok: true });
   });

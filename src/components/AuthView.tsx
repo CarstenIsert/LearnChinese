@@ -1,13 +1,19 @@
 import React, { useEffect, useState } from 'react';
-import { KeyRound, LogIn, UserPlus } from 'lucide-react';
+import { Bot, KeyRound, LogIn, UserPlus } from 'lucide-react';
 import { AuthUser } from '../types.ts';
+import { LegalTab } from './LegalDialog.tsx';
 
 interface AuthViewProps {
   requiresBootstrapAdmin: boolean;
   onAuthenticated: (user: AuthUser) => void;
+  onOpenLegal: (tab: LegalTab) => void;
 }
 
-export function AuthView({ requiresBootstrapAdmin, onAuthenticated }: AuthViewProps) {
+export function AuthView({
+  requiresBootstrapAdmin,
+  onAuthenticated,
+  onOpenLegal,
+}: AuthViewProps) {
   const [mode, setMode] = useState<'login' | 'register'>(() => {
     if (requiresBootstrapAdmin) return 'register';
     const params = new URLSearchParams(window.location.search);
@@ -142,7 +148,7 @@ export function AuthView({ requiresBootstrapAdmin, onAuthenticated }: AuthViewPr
                 type="text"
                 autoComplete="name"
                 required
-                placeholder="z. B. Carsten"
+                placeholder="z. B. Alex"
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
               />
@@ -198,6 +204,24 @@ export function AuthView({ requiresBootstrapAdmin, onAuthenticated }: AuthViewPr
                 : 'Account erstellen'}
           </button>
         </form>
+
+        <p className="ai-disclosure-note">
+          <Bot size={14} aria-hidden="true" />
+          <span>
+            KI-Hinweis (EU AI Act): Gesprächspartner werden durch Google Gemini simuliert;
+            Sprache und Antworten werden KI-gestützt erzeugt.
+          </span>
+        </p>
+
+        <div className="legal-links-row">
+          <button type="button" className="btn-link" onClick={() => onOpenLegal('impressum')}>
+            Impressum
+          </button>
+          <span aria-hidden="true">·</span>
+          <button type="button" className="btn-link" onClick={() => onOpenLegal('privacy')}>
+            Datenschutz &amp; KI-Hinweis
+          </button>
+        </div>
       </div>
     </main>
   );

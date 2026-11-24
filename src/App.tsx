@@ -2,9 +2,11 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BookOpen, Brain, GraduationCap, Home, PhoneCall, Sparkles } from 'lucide-react';
 import { LiveAudioManager } from './audio.ts';
 import { AuthView } from './components/AuthView.tsx';
+import { DeleteAccountDialog } from './components/DeleteAccountDialog.tsx';
 import { FreeTalkView } from './components/FreeTalkView.tsx';
 import { HomeView } from './components/HomeView.tsx';
 import { InviteDialog } from './components/InviteDialog.tsx';
+import { LegalDialog, LegalTab } from './components/LegalDialog.tsx';
 import { MemoryView } from './components/MemoryView.tsx';
 import { OnboardingDialog } from './components/OnboardingDialog.tsx';
 import { PersonaEditorDialog } from './components/PersonaEditorDialog.tsx';
@@ -32,6 +34,10 @@ export default function App() {
   const [requiresBootstrapAdmin, setRequiresBootstrapAdmin] = useState<boolean>(false);
   const [isInviteDialogOpen, setIsInviteDialogOpen] = useState<boolean>(false);
   const inviteDialogRef = useRef<HTMLDialogElement | null>(null);
+  const [isLegalDialogOpen, setIsLegalDialogOpen] = useState<boolean>(false);
+  const [legalTab, setLegalTab] = useState<LegalTab>('impressum');
+  const legalDialogRef = useRef<HTMLDialogElement | null>(null);
+  const deleteAccountDialogRef = useRef<HTMLDialogElement | null>(null);
   const [isOnboardingOpen, setIsOnboardingOpen] = useState<boolean>(false);
   const onboardingDialogRef = useRef<HTMLDialogElement | null>(null);
   const [isPersonaEditorOpen, setIsPersonaEditorOpen] = useState<boolean>(false);
@@ -146,6 +152,16 @@ export default function App() {
   useEffect(() => {
     checkAuthAndBootstrap();
   }, [checkAuthAndBootstrap]);
+
+  const openLegalDialog = useCallback((tab: LegalTab) => {
+    setLegalTab(tab);
+    setIsLegalDialogOpen(true);
+    window.setTimeout(() => {
+      if (legalDialogRef.current && !legalDialogRef.current.open) {
+        legalDialogRef.current.showModal();
+      }
+    }, 0);
+  }, []);
 
   const handleLogout = useCallback(async () => {
     audioRef.current?.stopAll();
@@ -475,16 +491,26 @@ export default function App() {
 
   if (authStatus === 'unauthenticated') {
     return (
-      <AuthView
-        requiresBootstrapAdmin={requiresBootstrapAdmin}
-        onAuthenticated={(user) => {
-          setCurrentUser(user);
-          setRequiresBootstrapAdmin(false);
-          setAuthStatus('authenticated');
-          setErrorMessage('');
-          fetchBootstrap();
-        }}
-      />
+      <>
+        <AuthView
+          requiresBootstrapAdmin={requiresBootstrapAdmin}
+          onAuthenticated={(user) => {
+            setCurrentUser(user);
+            setRequiresBootstrapAdmin(false);
+            setAuthStatus('authenticated');
+            setErrorMessage('');
+            fetchBootstrap();
+          }}
+          onOpenLegal={openLegalDialog}
+        />
+        <LegalDialog
+          dialogRef={legalDialogRef}
+          isOpen={isLegalDialogOpen}
+          activeTab={legalTab}
+          onChangeTab={setLegalTab}
+          onClose={() => setIsLegalDialogOpen(false)}
+        />
+      </>
     );
   }
 
@@ -568,6 +594,9 @@ export default function App() {
               onOpenInvites={() => {
                 setIsInviteDialogOpen(true);
                 inviteDialogRef.current?.showModal();
+              }}
+              onOpenDeleteAccount={() => {
+                deleteAccountDialogRef.current?.showModal();
               }}
               onLogout={handleLogout}
             />
@@ -738,12 +767,54 @@ export default function App() {
         )}
       </main>
 
+      {!isInActiveCall && (
+        <footer className="app-legal-footer">
+          <span className="app-legal-ai-note">
+            KI-gestützter Sprachtutor (Google Gemini · EU AI Act Art. 50)
+          </span>
+          <div className="legal-links-row">
+            <button type="button" className="btn-link" onClick={() => openLegalDialog('impressum')}>
+              Impressum
+            </button>
+            <span aria-hidden="true">·</span>
+            <button type="button" className="btn-link" onClick={() => openLegalDialog('privacy')}>
+              Datenschutz &amp; KI-Hinweis
+            </button>
+          </div>
+        </footer>
+      )}
+
       <SessionRecapDialog dialogRef={recapDialogRef} recap={lastRecap} />
       <InviteDialog
         dialogRef={inviteDialogRef}
         isOpen={isInviteDialogOpen}
         onClose={() => setIsInviteDialogOpen(false)}
       />
+      <LegalDialog
+        dialogRef={legalDialogRef}
+        isOpen={isLegalDialogOpen}
+        activeTab={legalTab}
+        onChangeTab={setLegalTab}
+        onClose={() => setIsLegalDialogOpen(false)}
+      />
+      {currentUser && (
+        <DeleteAccountDialog
+          dialogRef={deleteAccountDialogRef}
+          userEmail={currentUser.email}
+          onClose={() => {}}
+          onDeleted={() => {
+            audioRef.current?.stopAll();
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              wsRef.current.close();
+            }
+            setCallState('idle');
+            hasAutoOpenedOnboardingRef.current = false;
+            setCurrentUser(null);
+            setData(null);
+            setAuthStatus('unauthenticated');
+          }}
+        />
+      )}
       <OnboardingDialog
         dialogRef={onboardingDialogRef}
         isOpen={isOnboardingOpen}

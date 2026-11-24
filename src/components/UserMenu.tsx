@@ -1,15 +1,22 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ChevronDown, LogOut, Sparkles, User, UserPlus } from 'lucide-react';
+import { ChevronDown, LogOut, Sparkles, Trash2, User, UserPlus } from 'lucide-react';
 import { AuthUser } from '../types.ts';
 
 interface UserMenuProps {
   user: AuthUser;
   onOpenOnboarding: () => void;
   onOpenInvites: () => void;
+  onOpenDeleteAccount: () => void;
   onLogout: () => void;
 }
 
-export function UserMenu({ user, onOpenOnboarding, onOpenInvites, onLogout }: UserMenuProps) {
+export function UserMenu({
+  user,
+  onOpenOnboarding,
+  onOpenInvites,
+  onOpenDeleteAccount,
+  onLogout,
+}: UserMenuProps) {
   const [isOpen, setIsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
@@ -84,6 +91,19 @@ export function UserMenu({ user, onOpenOnboarding, onOpenInvites, onLogout }: Us
               Einladen
             </button>
           )}
+
+          <button
+            type="button"
+            role="menuitem"
+            className="user-menu-item is-danger"
+            onClick={() => {
+              setIsOpen(false);
+              onOpenDeleteAccount();
+            }}
+          >
+            <Trash2 size={15} aria-hidden="true" />
+            Konto löschen
+          </button>
 
           <button
             type="button"

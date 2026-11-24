@@ -40,6 +40,7 @@ import {
 import {
   AuthUser,
   createAuthRouter,
+  createInMemoryRateLimiter,
   getAuthenticatedUserFromRequest,
   isAuthEnforced,
   requireAuth,
@@ -63,6 +64,10 @@ app.use((_req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws: wss:; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+  );
   next();
 });
 app.use(express.json({ limit: '5mb' }));
@@ -70,9 +75,81 @@ app.use(express.json({ limit: '5mb' }));
 const PORT = Number(process.env.PORT || 6889);
 const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-3.8-live';
 const TTS_CACHE_DIR = path.resolve(process.cwd(), 'data', 'tts-cache');
+const MAX_TTS_CACHE_BYTES = 100 * 1024 * 1024; // 100 MB
+const TTS_CACHE_EVICT_TARGET_BYTES = 80 * 1024 * 1024; // 80 MB
+const MAX_TTS_CACHE_FILES = 1500;
+const TTS_CACHE_EVICT_TARGET_FILES = 1200;
+
 if (!fs.existsSync(TTS_CACHE_DIR)) {
   fs.mkdirSync(TTS_CACHE_DIR, { recursive: true });
 }
+
+function enforceTtsCacheLimit(): void {
+  try {
+    const entries = fs
+      .readdirSync(TTS_CACHE_DIR, { withFileTypes: true })
+      .filter((e) => e.isFile() && e.name.endsWith('.wav'))
+      .map((e) => {
+        const fullPath = path.join(TTS_CACHE_DIR, e.name);
+        const stat = fs.statSync(fullPath);
+        return { fullPath, size: stat.size, mtimeMs: stat.mtimeMs };
+      });
+
+    let totalBytes = entries.reduce((sum, f) => sum + f.size, 0);
+    let totalFiles = entries.length;
+    if (totalBytes <= MAX_TTS_CACHE_BYTES && totalFiles <= MAX_TTS_CACHE_FILES) {
+      return;
+    }
+
+    entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
+    for (const file of entries) {
+      if (totalBytes <= TTS_CACHE_EVICT_TARGET_BYTES && totalFiles <= TTS_CACHE_EVICT_TARGET_FILES) {
+        break;
+      }
+      try {
+        fs.unlinkSync(file.fullPath);
+        totalBytes -= file.size;
+        totalFiles -= 1;
+      } catch {
+        // ignore
+      }
+    }
+  } catch (err) {
+    console.warn('TTS cache eviction error:', err);
+  }
+}
+
+const topicSuggestLimiter = createInMemoryRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  maxRequests: 20,
+});
+const curriculumExpandLimiter = createInMemoryRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  maxRequests: 10,
+});
+const ttsLimiter = createInMemoryRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  maxRequests: 60,
+});
+const ttsDailySynthesisLimiter = createInMemoryRateLimiter({
+  windowMs: 24 * 60 * 60 * 1000,
+  maxRequests: 250,
+  errorMessage: 'Tägliches Sprachsynthese-Limit erreicht. Bitte morgen erneut versuchen.',
+});
+const pronunciationLimiter = createInMemoryRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  maxRequests: 30,
+});
+const wsSessionStartLimiter = createInMemoryRateLimiter({
+  windowMs: 60 * 60 * 1000,
+  maxRequests: 10,
+  errorMessage: 'Zu viele Gesprächsstarts in der letzten Stunde. Bitte warte kurz.',
+});
+const wsTextInputLimiter = createInMemoryRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  maxRequests: 60,
+  errorMessage: 'Zu viele Textnachrichten in kurzer Zeit. Bitte warte kurz.',
+});
 
 async function synthesizeMandarinWithLive(
   ai: GoogleGenAI,
@@ -255,7 +332,7 @@ app.post('/api/profile/complexity', (req, res) => {
   res.json({ ok: true, stats: getLearningStats(userId), profile: getLearnerProfile(userId) });
 });
 
-app.post('/api/topics/suggest', async (req, res) => {
+app.post('/api/topics/suggest', (req, res, next) => topicSuggestLimiter.middleware(req, res, next), async (req, res) => {
   const userId = req.user?.id ?? DEFAULT_USER_ID;
   const { personaId, recentTopics } = (req.body || {}) as {
     personaId?: string;
@@ -270,7 +347,7 @@ app.post('/api/topics/suggest', async (req, res) => {
   res.json(result);
 });
 
-app.post('/api/curriculum/expand', async (req, res) => {
+app.post('/api/curriculum/expand', (req, res, next) => curriculumExpandLimiter.middleware(req, res, next), async (req, res) => {
   const userId = req.user?.id ?? DEFAULT_USER_ID;
   const { targetLevel } = (req.body || {}) as { targetLevel?: 'HSK 3' | 'HSK 4' };
   const validLevel = targetLevel === 'HSK 3' || targetLevel === 'HSK 4' ? targetLevel : undefined;
@@ -285,7 +362,7 @@ app.post('/api/curriculum/expand', async (req, res) => {
   });
 });
 
-app.get('/api/tts', async (req, res) => {
+app.get('/api/tts', (req, res, next) => ttsLimiter.middleware(req, res, next), async (req, res) => {
   const rawText = typeof req.query.text === 'string' ? req.query.text.trim() : '';
   const forceRefresh = req.query.refresh === '1' || req.query.refresh === 'true';
   if (!rawText || rawText.length > 200) {
@@ -309,6 +386,13 @@ app.get('/api/tts', async (req, res) => {
     return;
   }
 
+  const synthKey = req.user ? `user:${req.user.id}` : `ip:${req.ip || 'unknown'}`;
+  const dailyCheck = ttsDailySynthesisLimiter.check(synthKey);
+  if (!dailyCheck.allowed) {
+    res.status(429).json({ error: 'Tägliches Sprachsynthese-Limit erreicht.' });
+    return;
+  }
+
   try {
     const ai = new GoogleGenAI({ apiKey: getApiKey() });
     const pcmBuffer = await synthesizeMandarinWithLive(ai, rawText, voiceName);
@@ -318,17 +402,18 @@ app.get('/api/tts', async (req, res) => {
     const paddedPcm = Buffer.concat([leadSilence, pcmBuffer, trailSilence]);
     const wavBuffer = wrapPcm16AsWav(paddedPcm, 24000);
     fs.writeFileSync(cacheFile, wavBuffer);
+    enforceTtsCacheLimit();
 
     res.setHeader('Content-Type', 'audio/wav');
     res.setHeader('Cache-Control', forceRefresh ? 'no-store' : 'no-cache');
     res.send(wavBuffer);
   } catch (err: any) {
     console.error('Gemini TTS error:', err);
-    res.status(500).json({ error: err?.message || 'TTS generation failed' });
+    res.status(500).json({ error: 'Sprachausgabe konnte nicht erzeugt werden.' });
   }
 });
 
-app.post('/api/vocabulary/check-pronunciation', async (req, res) => {
+app.post('/api/vocabulary/check-pronunciation', (req, res, next) => pronunciationLimiter.middleware(req, res, next), async (req, res) => {
   const { targetHanzi, targetPinyin, targetGerman, audioBase64, mimeType } = req.body as {
     targetHanzi?: string;
     targetPinyin?: string;
@@ -339,6 +424,16 @@ app.post('/api/vocabulary/check-pronunciation', async (req, res) => {
 
   if (!targetHanzi || !audioBase64 || !mimeType) {
     res.status(400).json({ error: 'targetHanzi, audioBase64, and mimeType are required' });
+    return;
+  }
+
+  if (
+    typeof audioBase64 !== 'string' ||
+    audioBase64.length > 2_000_000 ||
+    typeof mimeType !== 'string' ||
+    !/^audio\/(webm|ogg|mp4|wav|mpeg|mp3|aac)(;.*)?$/i.test(mimeType.trim())
+  ) {
+    res.status(400).json({ error: 'Ungültiges Audioformat oder Aufnahme zu groß.' });
     return;
   }
 
@@ -395,7 +490,7 @@ Return structured JSON with:
     res.json(result);
   } catch (err: any) {
     console.error('Pronunciation check error:', err);
-    res.status(500).json({ error: err?.message || 'Pronunciation check failed' });
+    res.status(500).json({ error: 'Ausspracheprüfung fehlgeschlagen.' });
   }
 });
 
@@ -593,6 +688,9 @@ function buildWavBase64FromPcm16(chunks: Buffer[], sampleRate = 16000): string |
 // --- WebSocket Server for Gemini Multimodal Live API ---
 
 const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
+const MAX_CONCURRENT_WS_PER_USER = 2;
+const MAX_WS_SESSION_MS = 75 * 60 * 1000; // 75 minutes (> 1 hour conversation)
+const activeWsCountByUser = new Map<number, number>();
 
 function isSameOriginUpgrade(req: http.IncomingMessage): boolean {
   const origin = req.headers.origin;
@@ -628,12 +726,26 @@ server.on('upgrade', (req, socket, head) => {
 
 wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: AuthUser | null) => {
   const userId = user?.id ?? DEFAULT_USER_ID;
+  const currentActive = activeWsCountByUser.get(userId) || 0;
+  if (currentActive >= MAX_CONCURRENT_WS_PER_USER) {
+    clientWs.send(
+      JSON.stringify({
+        type: 'error',
+        message: 'Es sind bereits zu viele aktive Gespräche geöffnet. Bitte schließe zuerst andere Tabs.',
+      })
+    );
+    clientWs.close(1008, 'Too many concurrent sessions');
+    return;
+  }
+  activeWsCountByUser.set(userId, currentActive + 1);
+
   let geminiSession: any = null;
   let currentSessionDbId: number | null = null;
   let currentPersonaId = 'coach-lin';
   let currentScenarioId: string | undefined = undefined;
   let isOnboardingMode = false;
   let sessionStartMs = 0;
+  let maxSessionTimer: ReturnType<typeof setTimeout> | null = null;
   let toneAnalysisEnabled = false;
   const userSpeechChunks: Buffer[] = [];
   let userSpeechBytes = 0;
@@ -673,6 +785,15 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
 
       // 1. Start a new Gemini Live voice session (regular Chinese practice OR German onboarding)
       if (msg.type === 'start_session' || msg.type === 'start_onboarding') {
+        const startCheck = wsSessionStartLimiter.check(`user:${userId}`);
+        if (!startCheck.allowed) {
+          sendToClient({
+            type: 'error',
+            message: 'Zu viele Gesprächsstarts in kurzer Zeit. Bitte warte einen Moment.',
+          });
+          return;
+        }
+
         if (!hasValidApiKey()) {
           sendToClient({
             type: 'error',
@@ -1016,7 +1137,7 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
               console.error('Gemini Live error:', err);
               sendToClient({
                 type: 'error',
-                message: `Verbindungsfehler zum Sprachmodell: ${err?.message || 'Bitte API Key und Netzwerk prüfen.'}`,
+                message: 'Verbindungsfehler zum Sprachmodell. Bitte versuche es gleich erneut.',
               });
             },
             onclose: () => {
@@ -1026,6 +1147,22 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
             },
           },
         });
+
+        if (maxSessionTimer) clearTimeout(maxSessionTimer);
+        maxSessionTimer = setTimeout(() => {
+          if (!isClosing && clientWs.readyState === WebSocket.OPEN) {
+            sendToClient({
+              type: 'error',
+              message: 'Maximale Gesprächsdauer (75 Minuten) erreicht. Bitte starte bei Bedarf ein neues Gespräch.',
+            });
+            try {
+              geminiSession?.close();
+            } catch {
+              // ignore
+            }
+            clientWs.close(1000, 'Max session duration reached');
+          }
+        }, MAX_WS_SESSION_MS);
 
         setTimeout(() => {
           if (geminiSession) {
@@ -1069,7 +1206,15 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
 
       // 3. Send a quick text/hint request during the call
       else if (msg.type === 'text_input' && geminiSession) {
-        const userText = String(msg.text || '').trim();
+        const textCheck = wsTextInputLimiter.check(`user:${userId}`);
+        if (!textCheck.allowed) {
+          sendToClient({
+            type: 'error',
+            message: 'Zu viele Textnachrichten in kurzer Zeit. Bitte warte kurz.',
+          });
+          return;
+        }
+        const userText = String(msg.text || '').trim().slice(0, 1000);
         if (userText) {
           flushTranscriptBuffers();
           transcript.push({
@@ -1141,13 +1286,23 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
       console.error('WS message handling error:', err);
       sendToClient({
         type: 'error',
-        message: err?.message || 'Fehler bei der Verbindung zum Sprachmodell.',
+        message: 'Fehler bei der Verbindung zum Sprachmodell.',
       });
     }
   });
 
   clientWs.on('close', () => {
     isClosing = true;
+    if (maxSessionTimer) {
+      clearTimeout(maxSessionTimer);
+      maxSessionTimer = null;
+    }
+    const count = activeWsCountByUser.get(userId) || 1;
+    if (count <= 1) {
+      activeWsCountByUser.delete(userId);
+    } else {
+      activeWsCountByUser.set(userId, count - 1);
+    }
     if (geminiSession) {
       try {
         geminiSession.close();

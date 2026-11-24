@@ -1163,3 +1163,45 @@ export function createSessionRecord(
     .run(userId, personaId, scenarioId);
   return Number(info.lastInsertRowid);
 }
+
+export function deleteUserAccount(userId: number): { ok: boolean; error?: string } {
+  const user = db.prepare(`SELECT id, role FROM users WHERE id = ?`).get(userId) as
+    | { id: number; role: string }
+    | undefined;
+  if (!user) {
+    return { ok: false, error: 'Account not found.' };
+  }
+
+  if (user.role === 'admin') {
+    const otherUsers = (
+      db.prepare(`SELECT COUNT(*) as c FROM users WHERE id != ?`).get(userId) as { c: number }
+    ).c;
+    const otherAdmins = (
+      db.prepare(`SELECT COUNT(*) as c FROM users WHERE id != ? AND role = 'admin'`).get(userId) as {
+        c: number;
+      }
+    ).c;
+    if (otherUsers > 0 && otherAdmins === 0) {
+      return {
+        ok: false,
+        error: 'Der letzte Admin-Account kann nicht gelöscht werden, solange noch andere Nutzer existieren.',
+      };
+    }
+  }
+
+  const runDelete = db.transaction(() => {
+    db.prepare(`DELETE FROM persona_episodes WHERE user_id = ?`).run(userId);
+    db.prepare(`DELETE FROM sessions WHERE user_id = ?`).run(userId);
+    db.prepare(`DELETE FROM curriculum_scenarios WHERE user_id = ?`).run(userId);
+    db.prepare(`DELETE FROM memory_facts WHERE user_id = ?`).run(userId);
+    db.prepare(`DELETE FROM learner_skill_memory WHERE user_id = ?`).run(userId);
+    db.prepare(`DELETE FROM vocabulary WHERE user_id = ?`).run(userId);
+    db.prepare(`DELETE FROM personas WHERE user_id = ?`).run(userId);
+    db.prepare(`DELETE FROM learner_profile WHERE user_id = ?`).run(userId);
+    db.prepare(`DELETE FROM auth_sessions WHERE user_id = ?`).run(userId);
+    db.prepare(`DELETE FROM users WHERE id = ?`).run(userId);
+  });
+
+  runDelete();
+  return { ok: true };
+}
