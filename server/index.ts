@@ -7,6 +7,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
 import { analyzeAndPersistSession, TranscriptEntry } from './analyzer.ts';
+import { selectSessionMemoryContext } from './memory.ts';
 import {
   expandCurriculumNext,
   HSK_CURRICULUM_PROGRESSION,
@@ -30,6 +31,7 @@ import {
   getPersonaById,
   getRecentFamilyEpisodesAcrossAll,
   getRecentSessions,
+  getScenarioById,
   initDatabase,
   recordVocabularyReview,
   saveOrUpdateVocabulary,
@@ -837,13 +839,30 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
             : undefined;
           const hasVocabQuiz = Boolean(vocabQuizWords && vocabQuizWords.length > 0);
           const persona = getPersonaById(currentPersonaId, userId) ?? fallbackPersona;
+          const scenario = currentScenarioId ? getScenarioById(currentScenarioId, userId) : undefined;
+          const queryText = [
+            scenario?.title_de,
+            scenario?.description_de,
+            scenario?.target_grammar,
+            customTopic,
+            !scenario && !customTopic ? persona.initial_hook : undefined,
+          ]
+            .filter(Boolean)
+            .join(' — ');
+          const memoryContext = await selectSessionMemoryContext({
+            apiKey: getApiKey(),
+            personaId: persona.id,
+            queryText,
+            userId,
+          });
           voiceName = persona.voice_name;
           systemInstruction = buildSystemPrompt(
             currentPersonaId,
             currentScenarioId,
             customTopic,
             userId,
-            vocabQuizWords
+            vocabQuizWords,
+            memoryContext
           );
           currentSessionDbId = createSessionRecord(currentPersonaId, currentScenarioId ?? null, userId);
           sessionStartMs = Date.now();
@@ -1041,11 +1060,13 @@ wss.on('connection', (clientWs: WebSocket, _req: http.IncomingMessage, user: Aut
                   } else if (call.name === 'remember_fact' || call.name === 'save_environment_fact') {
                     const category = String(args.category || 'general');
                     const fact = String(args.fact || '');
+                    const tier = args.tier === 'core' ? 'core' : 'episodic';
                     const factId = addMemoryFact(
                       category,
                       fact,
                       isOnboardingMode ? 'onboarding' : currentPersonaId,
-                      userId
+                      userId,
+                      tier
                     );
 
                     sendToClient({

@@ -2,15 +2,19 @@ import { GoogleGenAI, Type } from '@google/genai';
 import { maybeAutoExpandCurriculum } from './curriculum.ts';
 import {
   addMemoryFact,
+  archiveMemoryFact,
   db,
   DEFAULT_USER_ID,
   getAllMemoryFacts,
   getLearnerProfile,
   getPersonaById,
+  MemoryTier,
   recordVocabularyReview,
   saveOrUpdateVocabulary,
+  updateMemoryFact,
   upsertLearnerSkill,
 } from './db.ts';
+import { ensureMissingEmbeddings } from './memory.ts';
 
 export interface TranscriptEntry {
   speaker: 'user' | 'ai';
@@ -27,7 +31,15 @@ export interface SessionReflectionResult {
     id?: number;
     category: string;
     fact: string;
+    tier?: MemoryTier;
   }>;
+  updated_facts?: Array<{
+    id: number;
+    fact: string;
+    category?: string;
+    tier?: MemoryTier;
+  }>;
+  archived_fact_ids?: number[];
   coaching_tips: Array<{
     what_you_said: string;
     better_taiwan_mandarin: string;
@@ -122,7 +134,12 @@ export async function analyzeAndPersistSession(params: {
       )
       .join('\n');
 
-    const existingFactsList = existingFacts.map((f) => `- [${f.category}] ${f.fact}`).join('\n');
+    const coreExisting = existingFacts.filter((f) => f.tier === 'core').slice(0, 25);
+    const episodicExisting = existingFacts.filter((f) => f.tier !== 'core').slice(0, 35);
+    const analyzerFacts = [...coreExisting, ...episodicExisting];
+    const existingFactsList = analyzerFacts
+      .map((f) => `- [id=${f.id}][${f.tier}][${f.category}] ${f.fact}`)
+      .join('\n');
 
     const audioInstruction = userAudioWavBase64
       ? `\n8. AUDIO TONE & PRONUNCIATION ANALYSIS (\`tone_feedback\`): Listen carefully to the attached WAV recording of ${learnerName}'s spoken Mandarin. Identify 1 to 3 specific words or short phrases where ${learnerName}'s Mandarin tones (声调: 1st flat, 2nd rising, 3rd dipping, 4th falling) or initials/finals sounded off or flat. Describe what you actually heard in the audio (\`what_was_heard\`) and give a clear, encouraging correction in German (\`correction_de\`) with the target Simplified Hanzi (\`word_or_phrase\`) and Pinyin (\`pinyin\`). If ${learnerName} only spoke German or audio was unclear, return an empty array.`
@@ -141,7 +158,9 @@ ${formattedTranscript}
 Return a structured JSON analysis that:
 1. Summarizes the conversation warmly in German (\`summary_de\`).
 2. Writes a 1-2 sentence episodic memory summary for ${persona?.name_hanzi} (\`episode_summary_for_persona\`) and a natural follow-up question/hook for their NEXT chat (\`next_hook_for_persona\`).
-3. Extracts any genuinely NEW personal facts, travel plans, preferences, or family details ${learnerName} mentioned (\`new_facts\`). Leave empty if no new facts were shared.
+3. Extracts any genuinely NEW personal facts, travel plans, preferences, or family details ${learnerName} mentioned (\`new_facts\`). Classify each as \`tier: "core"\` (enduring identity, family, job, long-term hobbies/goals) or \`tier: "episodic"\` (upcoming/past trips, temporary plans, one-off events). Leave empty if no new facts were shared.
+   - If the conversation updates or supersedes an existing fact (e.g., a planned trip has now happened, or a detail changed), put the updated wording in \`updated_facts\` using its \`id\`.
+   - If an existing fact is now completely obsolete or redundant with another fact, include its \`id\` in \`archived_fact_ids\`.
 4. Provides 1 to 3 helpful Mandarin coaching tips (\`coaching_tips\`) comparing something ${learnerName} said (or tried to say) with a natural Mandarin phrasing (in Simplified Characters + Pinyin + German explanation).
 5. Identifies 1 or 2 grammar/communicative skill observations (\`skill_updates\`) with status ("struggling", "practicing", or "comfortable").
 6. Extracts up to 3 key vocabulary words from the chat that were important or new (\`vocab_extracted\`, in Simplified Characters + Pinyin + German).
@@ -177,9 +196,27 @@ Return a structured JSON analysis that:
                 properties: {
                   category: { type: Type.STRING },
                   fact: { type: Type.STRING },
+                  tier: { type: Type.STRING },
                 },
                 required: ['category', 'fact'],
               },
+            },
+            updated_facts: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  id: { type: Type.INTEGER },
+                  fact: { type: Type.STRING },
+                  category: { type: Type.STRING },
+                  tier: { type: Type.STRING },
+                },
+                required: ['id', 'fact'],
+              },
+            },
+            archived_fact_ids: {
+              type: Type.ARRAY,
+              items: { type: Type.INTEGER },
             },
             coaching_tips: {
               type: Type.ARRAY,
@@ -265,9 +302,14 @@ Return a structured JSON analysis that:
       durationSeconds,
       userId
     );
-    await maybeAutoExpandCurriculum(apiKey, userId).catch((err) => {
-      console.warn('Auto curriculum expansion skipped:', err);
-    });
+    await Promise.allSettled([
+      maybeAutoExpandCurriculum(apiKey, userId).catch((err) => {
+        console.warn('Auto curriculum expansion skipped:', err);
+      }),
+      ensureMissingEmbeddings(apiKey, userId).catch((err) => {
+        console.warn('Post-session embedding backfill skipped:', err);
+      }),
+    ]);
     return savedResult;
   } catch (err) {
     console.error('Post-session analyzer error:', err);
@@ -293,12 +335,30 @@ function persistReflectionToDb(
   durationSeconds?: number,
   userId = DEFAULT_USER_ID
 ): SessionReflectionResult {
-  // 1. Save new facts
+  // 1. Consolidate existing facts (update / archive) and save new facts
+  for (const u of result.updated_facts || []) {
+    if (typeof u.id === 'number' && u.fact && u.fact.trim()) {
+      const tier: MemoryTier | undefined =
+        u.tier === 'core' || u.tier === 'episodic' ? u.tier : undefined;
+      updateMemoryFact(
+        u.id,
+        { fact: u.fact.trim(), category: u.category?.trim(), tier },
+        userId
+      );
+    }
+  }
+  for (const id of result.archived_fact_ids || []) {
+    if (typeof id === 'number') {
+      archiveMemoryFact(id, userId);
+    }
+  }
+
   const savedFacts: SessionReflectionResult['new_facts'] = [];
   for (const f of result.new_facts || []) {
     if (f.fact && f.fact.trim()) {
-      const id = addMemoryFact(f.category || 'general', f.fact.trim(), personaId, userId);
-      savedFacts.push({ id, category: f.category || 'general', fact: f.fact.trim() });
+      const tier: MemoryTier = f.tier === 'core' ? 'core' : 'episodic';
+      const id = addMemoryFact(f.category || 'general', f.fact.trim(), personaId, userId, tier);
+      savedFacts.push({ id, category: f.category || 'general', fact: f.fact.trim(), tier });
     }
   }
   result.new_facts = savedFacts;

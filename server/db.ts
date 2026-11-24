@@ -193,6 +193,7 @@ export function initDatabase() {
 
   migrateToMultiUserSchema();
   fixPersonaForeignKeys();
+  migrateMemoryLifecycleColumns();
 
   if (!hasColumn('learner_profile', 'onboarding_completed')) {
     db.exec(`ALTER TABLE learner_profile ADD COLUMN onboarding_completed INTEGER NOT NULL DEFAULT 0`);
@@ -866,41 +867,194 @@ export function deletePersona(personaId: string, userId = DEFAULT_USER_ID): { ok
   return { ok: true };
 }
 
-export function getAllMemoryFacts(userId = DEFAULT_USER_ID) {
+export type MemoryTier = 'core' | 'episodic';
+
+export interface MemoryFactRow {
+  id: number;
+  user_id: number;
+  category: string;
+  fact: string;
+  tier: MemoryTier;
+  status: 'active' | 'archived';
+  source_persona_id: string | null;
+  last_referenced_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MemoryFactWithEmbedding extends MemoryFactRow {
+  embedding: string | null;
+}
+
+export interface PersonaEpisodeWithEmbedding {
+  id: number;
+  user_id: number;
+  persona_id: string;
+  persona_name: string;
+  session_id: number | null;
+  summary: string;
+  next_hook: string | null;
+  embedding: string | null;
+  last_referenced_at: string | null;
+  created_at: string;
+}
+
+function migrateMemoryLifecycleColumns() {
+  if (!hasColumn('memory_facts', 'tier')) {
+    db.exec(`ALTER TABLE memory_facts ADD COLUMN tier TEXT NOT NULL DEFAULT 'episodic'`);
+  }
+  if (!hasColumn('memory_facts', 'status')) {
+    db.exec(`ALTER TABLE memory_facts ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`);
+  }
+  if (!hasColumn('memory_facts', 'embedding')) {
+    db.exec(`ALTER TABLE memory_facts ADD COLUMN embedding TEXT`);
+  }
+  if (!hasColumn('memory_facts', 'last_referenced_at')) {
+    db.exec(`ALTER TABLE memory_facts ADD COLUMN last_referenced_at TEXT`);
+  }
+  if (!hasColumn('persona_episodes', 'embedding')) {
+    db.exec(`ALTER TABLE persona_episodes ADD COLUMN embedding TEXT`);
+  }
+  if (!hasColumn('persona_episodes', 'last_referenced_at')) {
+    db.exec(`ALTER TABLE persona_episodes ADD COLUMN last_referenced_at TEXT`);
+  }
+}
+
+export function getAllMemoryFacts(userId = DEFAULT_USER_ID): MemoryFactRow[] {
   return db
-    .prepare('SELECT * FROM memory_facts WHERE user_id = ? ORDER BY id DESC')
-    .all(userId) as Array<{
-    id: number;
-    user_id: number;
-    category: string;
-    fact: string;
-    source_persona_id: string | null;
-    created_at: string;
-  }>;
+    .prepare(
+      `SELECT id, user_id, category, fact, tier, status, source_persona_id, last_referenced_at, created_at, updated_at
+       FROM memory_facts
+       WHERE user_id = ? AND status = 'active'
+       ORDER BY id DESC`
+    )
+    .all(userId) as MemoryFactRow[];
+}
+
+export function getActiveMemoryFactsWithEmbeddings(
+  userId = DEFAULT_USER_ID
+): MemoryFactWithEmbedding[] {
+  return db
+    .prepare(
+      `SELECT id, user_id, category, fact, tier, status, source_persona_id, embedding, last_referenced_at, created_at, updated_at
+       FROM memory_facts
+       WHERE user_id = ? AND status = 'active'
+       ORDER BY id DESC`
+    )
+    .all(userId) as MemoryFactWithEmbedding[];
 }
 
 export function addMemoryFact(
   category: string,
   fact: string,
   sourcePersonaId?: string,
-  userId = DEFAULT_USER_ID
+  userId = DEFAULT_USER_ID,
+  tier: MemoryTier = 'episodic'
 ) {
-  // Check for exact or near duplicate
+  // Check for exact or near duplicate among active facts
   const existing = db
-    .prepare('SELECT id FROM memory_facts WHERE user_id = ? AND lower(fact) = lower(?)')
+    .prepare(
+      "SELECT id FROM memory_facts WHERE user_id = ? AND status = 'active' AND lower(fact) = lower(?)"
+    )
     .get(userId, fact.trim()) as { id: number } | undefined;
   if (existing) return existing.id;
 
+  const normalizedTier: MemoryTier = tier === 'core' ? 'core' : 'episodic';
   const info = db
     .prepare(
-      'INSERT INTO memory_facts (user_id, category, fact, source_persona_id) VALUES (?, ?, ?, ?)'
+      "INSERT INTO memory_facts (user_id, category, fact, tier, status, source_persona_id) VALUES (?, ?, ?, ?, 'active', ?)"
     )
-    .run(userId, category, fact.trim(), sourcePersonaId ?? null);
+    .run(userId, category, fact.trim(), normalizedTier, sourcePersonaId ?? null);
   return Number(info.lastInsertRowid);
+}
+
+export function updateMemoryFact(
+  id: number,
+  updates: { fact?: string; category?: string; tier?: MemoryTier },
+  userId = DEFAULT_USER_ID
+) {
+  const existing = db
+    .prepare("SELECT id, fact, category, tier FROM memory_facts WHERE id = ? AND user_id = ? AND status = 'active'")
+    .get(id, userId) as { id: number; fact: string; category: string; tier: MemoryTier } | undefined;
+  if (!existing) return false;
+
+  const nextFact = updates.fact?.trim() || existing.fact;
+  const nextCategory = updates.category?.trim() || existing.category;
+  const nextTier: MemoryTier =
+    updates.tier === 'core' || updates.tier === 'episodic' ? updates.tier : existing.tier;
+  const factChanged = nextFact !== existing.fact;
+
+  db.prepare(
+    `UPDATE memory_facts
+     SET fact = ?,
+         category = ?,
+         tier = ?,
+         embedding = CASE WHEN ? THEN NULL ELSE embedding END,
+         updated_at = datetime('now')
+     WHERE id = ? AND user_id = ?`
+  ).run(nextFact, nextCategory, nextTier, factChanged ? 1 : 0, id, userId);
+  return true;
+}
+
+export function archiveMemoryFact(id: number, userId = DEFAULT_USER_ID) {
+  db.prepare(
+    "UPDATE memory_facts SET status = 'archived', updated_at = datetime('now') WHERE id = ? AND user_id = ?"
+  ).run(id, userId);
 }
 
 export function deleteMemoryFact(id: number, userId = DEFAULT_USER_ID) {
   db.prepare('DELETE FROM memory_facts WHERE id = ? AND user_id = ?').run(id, userId);
+}
+
+export function saveMemoryFactEmbedding(id: number, embeddingJson: string, userId = DEFAULT_USER_ID) {
+  db.prepare('UPDATE memory_facts SET embedding = ? WHERE id = ? AND user_id = ?').run(
+    embeddingJson,
+    id,
+    userId
+  );
+}
+
+export function touchMemoryFactsReferenced(ids: number[], userId = DEFAULT_USER_ID) {
+  if (ids.length === 0) return;
+  const placeholders = ids.map(() => '?').join(', ');
+  db.prepare(
+    `UPDATE memory_facts SET last_referenced_at = datetime('now') WHERE user_id = ? AND id IN (${placeholders})`
+  ).run(userId, ...ids);
+}
+
+export function getPersonaEpisodesWithEmbeddings(
+  userId = DEFAULT_USER_ID
+): PersonaEpisodeWithEmbedding[] {
+  return db
+    .prepare(`
+      SELECT pe.id, pe.user_id, pe.persona_id, p.name_hanzi as persona_name,
+             pe.session_id, pe.summary, pe.next_hook, pe.embedding, pe.last_referenced_at, pe.created_at
+      FROM persona_episodes pe
+      JOIN personas p ON p.id = pe.persona_id AND p.user_id = pe.user_id
+      WHERE pe.user_id = ?
+      ORDER BY pe.id DESC
+    `)
+    .all(userId) as PersonaEpisodeWithEmbedding[];
+}
+
+export function savePersonaEpisodeEmbedding(
+  id: number,
+  embeddingJson: string,
+  userId = DEFAULT_USER_ID
+) {
+  db.prepare('UPDATE persona_episodes SET embedding = ? WHERE id = ? AND user_id = ?').run(
+    embeddingJson,
+    id,
+    userId
+  );
+}
+
+export function touchPersonaEpisodesReferenced(ids: number[], userId = DEFAULT_USER_ID) {
+  if (ids.length === 0) return;
+  const placeholders = ids.map(() => '?').join(', ');
+  db.prepare(
+    `UPDATE persona_episodes SET last_referenced_at = datetime('now') WHERE user_id = ? AND id IN (${placeholders})`
+  ).run(userId, ...ids);
 }
 
 export function getRecentEpisodesForPersona(

@@ -13,6 +13,7 @@ import {
   getRecentFamilyEpisodesAcrossAll,
   getScenarioById,
 } from './db.ts';
+import type { SelectedMemoryContext } from './memory.ts';
 
 export interface VocabQuizTarget {
   simplified_hanzi: string;
@@ -25,17 +26,22 @@ export function buildSystemPrompt(
   scenarioId?: string,
   customTopic?: string,
   userId = DEFAULT_USER_ID,
-  vocabQuizWords?: VocabQuizTarget[]
+  vocabQuizWords?: VocabQuizTarget[],
+  memoryContext?: SelectedMemoryContext
 ) {
   const profile = getLearnerProfile(userId);
   const fallbackPersona = getAllPersonas(userId)[0];
   const persona = getPersonaById(personaId, userId) ?? fallbackPersona;
   const scenario = scenarioId ? getScenarioById(scenarioId, userId) : undefined;
-  const facts = getAllMemoryFacts(userId);
-  const myEpisodes = getRecentEpisodesForPersona(persona.id, 3, userId);
-  const otherEpisodes = getRecentFamilyEpisodesAcrossAll(4, userId).filter(
-    (ep) => ep.persona_id !== persona.id
-  );
+  const fallbackFacts = memoryContext ? [] : getAllMemoryFacts(userId).slice(0, 15);
+  const myRecentEpisodes = memoryContext
+    ? memoryContext.myRecentEpisodes
+    : getRecentEpisodesForPersona(persona.id, 3, userId);
+  const myOlderEpisodes = memoryContext ? memoryContext.myOlderEpisodes : [];
+  const otherRecentEpisodes = memoryContext
+    ? memoryContext.otherRecentEpisodes
+    : getRecentFamilyEpisodesAcrossAll(4, userId).filter((ep) => ep.persona_id !== persona.id);
+  const otherOlderEpisodes = memoryContext ? memoryContext.otherOlderEpisodes : [];
   const skills = getLearnerSkills(userId);
   const dueWords = getDueVocabulary(6, userId);
   const stats = getLearningStats(userId);
@@ -60,27 +66,49 @@ export function buildSystemPrompt(
       ? `- **CURRENT PACING (Medium / Aufbau):** Speak **2–3 moderate sentences per turn** (around 10–18 Chinese characters per sentence). Mix familiar vocabulary with 1–2 newer/due SRS words and simple connectors (e.g. 因为…所以…, 先…然后…). End with a natural question.`
       : `- **CURRENT PACING (Natural / Fortgeschritten):** Speak **2–4 natural, richer sentences per turn** with varied everyday vocabulary, natural connectors, and idiomatic expressions while still keeping space for ${profile.name} to reply.`;
 
+  const factLines: string[] = [];
+  if (memoryContext) {
+    for (const f of memoryContext.coreFacts) {
+      factLines.push(`- [core/${f.category}] ${f.fact}`);
+    }
+    for (const f of memoryContext.recentFacts) {
+      factLines.push(`- [recent/${f.category}] ${f.fact}`);
+    }
+    for (const f of memoryContext.relevantOlderFacts) {
+      factLines.push(`- [relevant/${f.category}] ${f.fact}`);
+    }
+    for (const f of memoryContext.throwbackFacts) {
+      factLines.push(`- [throwback/${f.category}] ${f.fact}`);
+    }
+  } else {
+    for (const f of fallbackFacts) {
+      factLines.push(`- [${f.category}] ${f.fact}`);
+    }
+  }
   const factsText =
-    facts.length > 0
-      ? facts.map((f) => `- [${f.category}] ${f.fact}`).join('\n')
-      : '- No specific facts recorded yet.';
+    factLines.length > 0 ? factLines.join('\n') : '- No specific facts recorded yet.';
 
+  const myAllEpisodes = [...myRecentEpisodes, ...myOlderEpisodes];
   const myHistoryText =
-    myEpisodes.length > 0
-      ? myEpisodes
+    myAllEpisodes.length > 0
+      ? myAllEpisodes
           .map(
-            (ep) =>
-              `- Past chat (${ep.created_at}): ${ep.summary}${
+            (ep, idx) =>
+              `- ${idx >= myRecentEpisodes.length ? 'Earlier chat' : 'Past chat'} (${ep.created_at}): ${ep.summary}${
                 ep.next_hook ? `\n  -> Follow-up hook for today: ${ep.next_hook}` : ''
               }`
           )
           .join('\n')
       : `- First conversation in the app. Start with: ${customTopic || persona.initial_hook}`;
 
+  const otherAllEpisodes = [...otherRecentEpisodes, ...otherOlderEpisodes];
   const sharedHistoryText =
-    otherEpisodes.length > 0
-      ? otherEpisodes
-          .map((ep) => `- From ${ep.persona_name} (${ep.created_at}): ${ep.summary}`)
+    otherAllEpisodes.length > 0
+      ? otherAllEpisodes
+          .map(
+            (ep, idx) =>
+              `- From ${ep.persona_name} (${idx >= otherRecentEpisodes.length ? 'earlier, ' : ''}${ep.created_at}): ${ep.summary}`
+          )
           .join('\n')
       : '- No recent conversations with other conversation partners yet.';
 
@@ -277,6 +305,11 @@ export const LIVE_TOOLS_DECLARATIONS: FunctionDeclaration[] = [
         fact: {
           type: Type.STRING,
           description: 'Clear, concise fact statement in English or German.',
+        },
+        tier: {
+          type: Type.STRING,
+          description:
+            'Optional: "core" for enduring identity/family/job/hobby facts, or "episodic" (default) for trips, events, and temporary updates.',
         },
       },
       required: ['category', 'fact'],
