@@ -1,5 +1,6 @@
-import React, { useEffect } from 'react';
+import React from 'react';
 import { Bot, FileText, ShieldCheck, X } from 'lucide-react';
+import { ModalDialog } from './ModalDialog.tsx';
 
 export type LegalTab = 'impressum' | 'privacy';
 
@@ -18,40 +19,18 @@ export function LegalDialog({
   onChangeTab,
   onClose,
 }: LegalDialogProps) {
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    const handleCancel = (e: Event) => {
-      e.preventDefault();
-      dialog.close();
-      onClose();
-    };
-    const handleClick = (e: MouseEvent) => {
-      if (e.target === dialog) {
-        dialog.close();
-        onClose();
-      }
-    };
-    dialog.addEventListener('cancel', handleCancel);
-    dialog.addEventListener('click', handleClick);
-    return () => {
-      dialog.removeEventListener('cancel', handleCancel);
-      dialog.removeEventListener('click', handleClick);
-    };
-  }, [dialogRef, onClose]);
-
   const closeDialog = () => {
     dialogRef.current?.close();
     onClose();
   };
 
   return (
-    <dialog
-      ref={dialogRef}
+    <ModalDialog
+      dialogRef={dialogRef}
+      isOpen={isOpen}
+      onClose={onClose}
       className="legal-dialog"
       aria-labelledby="legal-dialog-title"
-      closedby="any"
-      open={isOpen ? undefined : undefined}
     >
       <div className="dialog-header">
         <h2 id="legal-dialog-title">
@@ -289,6 +268,6 @@ export function LegalDialog({
           Schließen
         </button>
       </div>
-    </dialog>
+    </ModalDialog>
   );
 }

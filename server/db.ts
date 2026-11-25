@@ -195,6 +195,14 @@ export function initDatabase() {
   fixPersonaForeignKeys();
   migrateMemoryLifecycleColumns();
 
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_memory_facts_user_status ON memory_facts(user_id, status);
+    CREATE INDEX IF NOT EXISTS idx_persona_episodes_user_persona ON persona_episodes(user_id, persona_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_user_ended_started ON sessions(user_id, ended_at, started_at);
+    CREATE INDEX IF NOT EXISTS idx_vocabulary_user_next_review ON vocabulary(user_id, next_review_at);
+    CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at);
+  `);
+
   if (!hasColumn('learner_profile', 'onboarding_completed')) {
     db.exec(`ALTER TABLE learner_profile ADD COLUMN onboarding_completed INTEGER NOT NULL DEFAULT 0`);
     db.exec(`
@@ -357,7 +365,8 @@ function migrateToMultiUserSchema() {
             mastery_score INTEGER NOT NULL DEFAULT 0,
             times_practiced INTEGER NOT NULL DEFAULT 0,
             last_practiced_at TEXT,
-            PRIMARY KEY (user_id, id)
+            PRIMARY KEY (user_id, id),
+            FOREIGN KEY (user_id, persona_id) REFERENCES personas(user_id, id)
           );
           INSERT INTO curriculum_scenarios_new (
             user_id, id, stage_number, stage_title_de, title_de, title_hanzi,
@@ -461,7 +470,8 @@ export function seedUserWorkspace(
   userId: number,
   options?: { displayName?: string; useLocalSeed?: boolean }
 ) {
-  const seedData = options?.useLocalSeed ? loadLocalOrGenericSeed() : GENERIC_SEED_PROFILE;
+  const runSeed = db.transaction(() => {
+    const seedData = options?.useLocalSeed ? loadLocalOrGenericSeed() : GENERIC_SEED_PROFILE;
   const personasToSeed =
     seedData.personas && seedData.personas.length > 0 ? seedData.personas : GENERIC_PERSONAS;
   const scenariosToSeed =
@@ -568,6 +578,8 @@ export function seedUserWorkspace(
       insertFact.run(userId, f.category, f.fact);
     }
   }
+  });
+  runSeed();
 }
 
 // Helper queries for the Memory Engine & API
@@ -1208,6 +1220,11 @@ export function recordVocabularyReview(
   outcome: 'used_actively' | 'recognized' | 'forgotten',
   userId = DEFAULT_USER_ID
 ) {
+  if (typeof simplifiedHanzi !== 'string' || !simplifiedHanzi.trim()) return null;
+  if (outcome !== 'used_actively' && outcome !== 'recognized' && outcome !== 'forgotten') {
+    return null;
+  }
+
   const word = db
     .prepare('SELECT * FROM vocabulary WHERE user_id = ? AND simplified_hanzi = ?')
     .get(userId, simplifiedHanzi.trim()) as ReturnType<typeof getDueVocabulary>[number] | undefined;

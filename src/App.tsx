@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BookOpen, Brain, GraduationCap, Home, PhoneCall, Sparkles } from 'lucide-react';
-import { LiveAudioManager } from './audio.ts';
+import { apiFetch, getErrorMessage } from './api.ts';
 import { AuthView } from './components/AuthView.tsx';
 import { DeleteAccountDialog } from './components/DeleteAccountDialog.tsx';
 import { FreeTalkView } from './components/FreeTalkView.tsx';
@@ -14,6 +14,7 @@ import { ScenariosView } from './components/ScenariosView.tsx';
 import { SessionRecapDialog } from './components/SessionRecapDialog.tsx';
 import { UserMenu } from './components/UserMenu.tsx';
 import { VocabularyView } from './components/VocabularyView.tsx';
+import { useLiveVoiceSession } from './hooks/useLiveVoiceSession.ts';
 import { useTopicAndCurriculum } from './hooks/useTopicAndCurriculum.ts';
 import {
   AuthStatusResponse,
@@ -52,13 +53,11 @@ export default function App() {
 
   // Call state
   const [callState, setCallState] = useState<'idle' | 'connecting' | 'in_call' | 'analyzing'>('idle');
-  const [callDurationSeconds, setCallDurationSeconds] = useState<number>(0);
+  const callStateRef = useRef<'idle' | 'connecting' | 'in_call' | 'analyzing'>('idle');
+  callStateRef.current = callState;
   const [enableToneAnalysis, setEnableToneAnalysis] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string>('');
   const [errorMessage, setErrorMessage] = useState<string>('');
-  const [isMuted, setIsMuted] = useState<boolean>(false);
-  const [micLevel, setMicLevel] = useState<number>(0);
-  const [aiSpeaking, setAiSpeaking] = useState<boolean>(false);
 
   // Live Vocab Popups & Blurred Transcript
   const [liveVocabPopups, setLiveVocabPopups] = useState<VocabularyWord[]>([]);
@@ -76,10 +75,18 @@ export default function App() {
   const [lastRecap, setLastRecap] = useState<SessionReflection | null>(null);
   const recapDialogRef = useRef<HTMLDialogElement | null>(null);
 
-  // WebSocket, Audio & Toast Timer refs
-  const wsRef = useRef<WebSocket | null>(null);
-  const audioRef = useRef<LiveAudioManager | null>(null);
+  // Toast timer & shared live voice session hook
   const toastTimerRef = useRef<number | null>(null);
+  const {
+    orbWrapperRef,
+    orbCircleRef,
+    isMuted,
+    startSession,
+    stopSession,
+    sendJson,
+    toggleMute,
+    markIntentionalClose,
+  } = useLiveVoiceSession();
 
   const showToast = useCallback((message: string, durationMs = 4200) => {
     if (toastTimerRef.current) {
@@ -109,24 +116,21 @@ export default function App() {
       });
       if (!hasAutoOpenedOnboardingRef.current && json.profile?.onboarding_completed === 0) {
         hasAutoOpenedOnboardingRef.current = true;
-        window.setTimeout(() => {
-          setIsOnboardingOpen(true);
-          if (onboardingDialogRef.current && !onboardingDialogRef.current.open) {
-            onboardingDialogRef.current.showModal();
-          }
-        }, 120);
+        setIsOnboardingOpen(true);
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       setErrorMessage(
-        `Backend-Server nicht erreichbar (${err?.message || 'Verbindungsfehler'}).`
+        `Backend-Server nicht erreichbar (${getErrorMessage(err, 'Verbindungsfehler')}).`
       );
     }
   }, []);
 
   const checkAuthAndBootstrap = useCallback(async () => {
     try {
-      const res = await fetch('/api/auth/me');
-      const auth = (await res.json()) as AuthStatusResponse;
+      const auth = await apiFetch<AuthStatusResponse>('/api/auth/me').catch(async () => {
+        const res = await fetch('/api/auth/me');
+        return (await res.json()) as AuthStatusResponse;
+      });
       setRequiresBootstrapAdmin(Boolean(auth.requiresBootstrapAdmin));
 
       if (auth.authenticated && auth.user) {
@@ -141,10 +145,10 @@ export default function App() {
         setCurrentUser(null);
         setAuthStatus('unauthenticated');
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       setAuthStatus('authenticated');
       setErrorMessage(
-        `Backend-Server nicht erreichbar (${err?.message || 'Verbindungsfehler'}).`
+        `Backend-Server nicht erreichbar (${getErrorMessage(err, 'Verbindungsfehler')}).`
       );
     }
   }, [fetchBootstrap]);
@@ -156,45 +160,23 @@ export default function App() {
   const openLegalDialog = useCallback((tab: LegalTab) => {
     setLegalTab(tab);
     setIsLegalDialogOpen(true);
-    window.setTimeout(() => {
-      if (legalDialogRef.current && !legalDialogRef.current.open) {
-        legalDialogRef.current.showModal();
-      }
-    }, 0);
   }, []);
 
   const handleLogout = useCallback(async () => {
-    audioRef.current?.stopAll();
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.close();
-    }
+    stopSession();
     setCallState('idle');
     await fetch('/api/auth/logout', { method: 'POST' }).catch(() => null);
     hasAutoOpenedOnboardingRef.current = false;
     setCurrentUser(null);
     setData(null);
     setAuthStatus('unauthenticated');
-  }, []);
+  }, [stopSession]);
 
-  // Live call duration timer
-  useEffect(() => {
-    if (callState !== 'in_call') return;
-    setCallDurationSeconds(0);
-    const id = window.setInterval(() => {
-      setCallDurationSeconds((prev) => prev + 1);
-    }, 1000);
-    return () => window.clearInterval(id);
-  }, [callState]);
-
-  // Clean up microphone, audio playback, WebSocket, and timers on unmount
+  // Clean up toast timer on unmount
   useEffect(() => {
     return () => {
       if (toastTimerRef.current) {
         window.clearTimeout(toastTimerRef.current);
-      }
-      audioRef.current?.stopAll();
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.close();
       }
     };
   }, []);
@@ -249,61 +231,29 @@ export default function App() {
         return;
       }
 
-      try {
-        setCallState('connecting');
-        setStatusMessage('Verbinde...');
+      setCallState('connecting');
+      setStatusMessage('Verbinde...');
 
-        const audioManager = new LiveAudioManager();
-        audioRef.current = audioManager;
-
-        audioManager.onVolumeChange = (vol, speaking) => {
-          setMicLevel(vol);
-          setAiSpeaking(speaking);
-        };
-
-        await audioManager.startMicrophone();
-
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws/live`;
-        const ws = new WebSocket(wsUrl);
-        wsRef.current = ws;
-
-        audioManager.onAudioInputChunk = (base64Pcm) => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'audio_input', data: base64Pcm }));
-          }
-        };
-
-        ws.onopen = () => {
-          ws.send(
-            JSON.stringify({
-              type: 'start_session',
-              personaId: targetPersonaId,
-              scenarioId: targetScenarioId || undefined,
-              topic: targetScenarioId || activeQuizWords.length > 0 ? undefined : suggestedTopic,
-              vocabQuizWords:
-                activeQuizWords.length > 0
-                  ? activeQuizWords.map((w) => ({
-                      simplified_hanzi: w.simplified_hanzi,
-                      pinyin: w.pinyin,
-                      german: w.german,
-                    }))
-                  : undefined,
-              enableToneAnalysis,
-            })
-          );
-        };
-
-        ws.onmessage = (event) => {
-          const msg = JSON.parse(event.data);
-
+      await startSession({
+        startPayload: {
+          type: 'start_session',
+          personaId: targetPersonaId,
+          scenarioId: targetScenarioId || undefined,
+          topic: targetScenarioId || activeQuizWords.length > 0 ? undefined : suggestedTopic,
+          vocabQuizWords:
+            activeQuizWords.length > 0
+              ? activeQuizWords.map((w) => ({
+                  simplified_hanzi: w.simplified_hanzi,
+                  pinyin: w.pinyin,
+                  german: w.german,
+                }))
+              : undefined,
+          enableToneAnalysis,
+        },
+        onMessage: (msg) => {
           if (msg.type === 'session_started') {
             setCallState('in_call');
             setStatusMessage('Verbunden — sprich einfach drauflos (Chinesisch oder Deutsch).');
-          } else if (msg.type === 'audio_chunk') {
-            audioManager.playPcm24kChunk(msg.data);
-          } else if (msg.type === 'interrupted') {
-            audioManager.interruptPlayback();
           } else if (msg.type === 'transcript_delta') {
             if (msg.speaker === 'user') {
               setLiveDraftUser(msg.fullTurnText || '');
@@ -324,7 +274,18 @@ export default function App() {
               );
               return [msg.word, ...filtered];
             });
-            fetchBootstrap();
+            setData((prev) => {
+              if (!prev) return prev;
+              const exists = prev.allVocabulary.some(
+                (w) => w.simplified_hanzi === msg.word.simplified_hanzi
+              );
+              const nextAll = exists
+                ? prev.allVocabulary.map((w) =>
+                    w.simplified_hanzi === msg.word.simplified_hanzi ? msg.word : w
+                  )
+                : [msg.word, ...prev.allVocabulary];
+              return { ...prev, allVocabulary: nextAll };
+            });
           } else if (msg.type === 'vocab_review_recorded') {
             setVocabQuizReviewed((prev) => ({
               ...prev,
@@ -339,129 +300,159 @@ export default function App() {
                   : 'Wiederholen'
               })`
             );
-            fetchBootstrap();
+            const updatedWord = msg.word;
+            if (updatedWord) {
+              setData((prev) => {
+                if (!prev) return prev;
+                return {
+                  ...prev,
+                  allVocabulary: prev.allVocabulary.map((w) =>
+                    w.id === updatedWord.id ? updatedWord : w
+                  ),
+                  dueVocabulary:
+                    msg.outcome === 'forgotten'
+                      ? prev.dueVocabulary
+                      : prev.dueVocabulary.filter((w) => w.id !== updatedWord.id),
+                };
+              });
+            }
           } else if (msg.type === 'memory_saved_toast' && msg.fact) {
             showToast(`Erinnerung gespeichert: "${msg.fact.fact}"`, 4800);
-            fetchBootstrap();
+            setData((prev) => {
+              if (!prev) return prev;
+              const newFact = {
+                id: msg.fact.id,
+                category: msg.fact.category,
+                fact: msg.fact.fact,
+                source_persona_id: null,
+                created_at: new Date().toISOString(),
+              };
+              const exists = prev.memoryFacts.some((f) => f.id === newFact.id);
+              return exists
+                ? prev
+                : { ...prev, memoryFacts: [newFact, ...prev.memoryFacts] };
+            });
           } else if (msg.type === 'analyzing_session') {
             setCallState('analyzing');
             setStatusMessage(msg.message || 'Gespräch wird ausgewertet...');
           } else if (msg.type === 'session_recap') {
-            audioManager.stopAll();
+            markIntentionalClose();
+            stopSession();
             setCallState('idle');
             setLastRecap(msg.reflection);
-            fetchBootstrap();
-            window.setTimeout(() => {
-              if (recapDialogRef.current && !recapDialogRef.current.open) {
-                recapDialogRef.current.showModal();
-              }
-            }, 80);
+            void fetchBootstrap();
+            if (recapDialogRef.current && !recapDialogRef.current.open) {
+              recapDialogRef.current.showModal();
+            }
           } else if (msg.type === 'error') {
             setErrorMessage(msg.message || 'Fehler bei der Verbindung zum Sprachmodell.');
-            audioManager.stopAll();
+            stopSession();
             setCallState('idle');
           }
-        };
-
-        ws.onerror = () => {
-          setErrorMessage('WebSocket-Verbindungsfehler zum lokalen Server.');
-          audioManager.stopAll();
+        },
+        onError: (message) => {
+          setErrorMessage(`Mikrofon- oder Verbindungsfehler: ${message}`);
           setCallState('idle');
-        };
-      } catch (err: any) {
-        setErrorMessage(
-          `Mikrofon- oder Verbindungsfehler: ${err?.message || 'Bitte Mikrofonzugriff erlauben.'}`
-        );
-        audioRef.current?.stopAll();
-        setCallState('idle');
-      }
+        },
+        onUnexpectedClose: () => {
+          if (callStateRef.current !== 'idle') {
+            setErrorMessage('Verbindung zum Server wurde unerwartet getrennt.');
+            setCallState('idle');
+          }
+        },
+      });
     },
     [
       cancelPendingTopicFetch,
       data,
       enableToneAnalysis,
       fetchBootstrap,
+      markIntentionalClose,
       selectedPersonaId,
       selectedScenarioId,
       showToast,
+      startSession,
+      stopSession,
       suggestedTopic,
     ]
   );
 
   const endCall = useCallback(() => {
-    audioRef.current?.stopAll();
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    const sent = sendJson({ type: 'end_session' });
+    if (sent) {
+      stopSession({ keepSocketOpenForRecap: true });
       setCallState('analyzing');
       setStatusMessage('Gespräch wird ausgewertet & Erinnerungen aktualisiert...');
-      wsRef.current.send(JSON.stringify({ type: 'end_session' }));
     } else {
+      stopSession();
       setCallState('idle');
     }
-  }, []);
-
-  const toggleMute = useCallback(() => {
-    setIsMuted((prev) => {
-      const next = !prev;
-      audioRef.current?.setMuted(next);
-      return next;
-    });
-  }, []);
+  }, [sendJson, stopSession]);
 
   const handleRequestGermanHelp = useCallback(() => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: 'text_input',
-          text: 'Ich habe das nicht verstanden. Bitte nenne mir die chinesischen Wörter/Begriffe einzeln, erkläre sie mir klar auf Deutsch (und zeige sie als Vokabelkarte), und wiederhole den Satz danach noch einmal langsam auf Chinesisch.',
-        })
-      );
-    }
-  }, []);
+    sendJson({
+      type: 'text_input',
+      text: 'Ich habe das nicht verstanden. Bitte nenne mir die chinesischen Wörter/Begriffe einzeln, erkläre sie mir klar auf Deutsch (und zeige sie als Vokabelkarte), und wiederhole den Satz danach noch einmal langsam auf Chinesisch.',
+    });
+  }, [sendJson]);
 
   const handleChangeComplexity = useCallback(
     async (preference: 'auto' | 'short' | 'medium' | 'natural') => {
-      await fetch('/api/profile/complexity', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ preference }),
-      });
-      await fetchBootstrap();
+      try {
+        await apiFetch('/api/profile/complexity', {
+          method: 'POST',
+          body: JSON.stringify({ preference }),
+        });
+        await fetchBootstrap();
+      } catch (err: unknown) {
+        setErrorMessage(getErrorMessage(err, 'Satzkomplexität konnte nicht gespeichert werden.'));
+      }
     },
     [fetchBootstrap]
   );
 
   const handleAddMemoryFact = useCallback(
     async (category: string, fact: string) => {
-      await fetch('/api/memories', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ category, fact }),
-      });
-      await fetchBootstrap();
+      try {
+        await apiFetch('/api/memories', {
+          method: 'POST',
+          body: JSON.stringify({ category, fact }),
+        });
+        await fetchBootstrap();
+      } catch (err: unknown) {
+        setErrorMessage(getErrorMessage(err, 'Erinnerung konnte nicht gespeichert werden.'));
+      }
     },
     [fetchBootstrap]
   );
 
   const handleDeleteMemoryFact = useCallback(
     async (id: number) => {
-      await fetch(`/api/memories/${id}`, { method: 'DELETE' });
-      await fetchBootstrap();
+      try {
+        await apiFetch(`/api/memories/${id}`, { method: 'DELETE' });
+        await fetchBootstrap();
+      } catch (err: unknown) {
+        setErrorMessage(getErrorMessage(err, 'Erinnerung konnte nicht gelöscht werden.'));
+      }
     },
     [fetchBootstrap]
   );
 
   const handleAddVocabulary = useCallback(
     async (simplifiedHanzi: string, pinyin: string, german: string) => {
-      await fetch('/api/vocabulary', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          simplified_hanzi: simplifiedHanzi,
-          pinyin,
-          german,
-        }),
-      });
-      await fetchBootstrap();
+      try {
+        await apiFetch('/api/vocabulary', {
+          method: 'POST',
+          body: JSON.stringify({
+            simplified_hanzi: simplifiedHanzi,
+            pinyin,
+            german,
+          }),
+        });
+        await fetchBootstrap();
+      } catch (err: unknown) {
+        setErrorMessage(getErrorMessage(err, 'Vokabel konnte nicht gespeichert werden.'));
+      }
     },
     [fetchBootstrap]
   );
@@ -471,12 +462,15 @@ export default function App() {
       simplifiedHanzi: string,
       outcome: 'used_actively' | 'recognized' | 'forgotten'
     ) => {
-      await fetch('/api/vocabulary/review', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ simplified_hanzi: simplifiedHanzi, outcome }),
-      });
-      await fetchBootstrap();
+      try {
+        await apiFetch('/api/vocabulary/review', {
+          method: 'POST',
+          body: JSON.stringify({ simplified_hanzi: simplifiedHanzi, outcome }),
+        });
+        await fetchBootstrap();
+      } catch (err: unknown) {
+        setErrorMessage(getErrorMessage(err, 'Vokabelbewertung konnte nicht gespeichert werden.'));
+      }
     },
     [fetchBootstrap]
   );
@@ -528,7 +522,7 @@ export default function App() {
     );
   }
 
-  const selectedPersona: Persona =
+  const selectedPersona: Persona | undefined =
     data.personas.find((p) => p.id === selectedPersonaId) || data.personas[0];
   const selectedScenario: CurriculumScenario | undefined = data.scenarios.find(
     (s) => s.id === selectedScenarioId
@@ -654,7 +648,7 @@ export default function App() {
             scenarios={data.scenarios}
             recentSessions={data.recentSessions}
             memoryFactsCount={data.memoryFacts.length}
-            selectedPersonaId={selectedPersona.id}
+            selectedPersonaId={selectedPersona?.id || ''}
             onSelectPersona={(id) => {
               setSelectedPersonaId(id);
               if (selectedScenario && selectedScenario.persona_id !== id) {
@@ -682,13 +676,12 @@ export default function App() {
             suggestedTopic={suggestedTopic}
             isShufflingTopic={isShufflingTopic}
             callState={callState}
-            callDurationSeconds={callDurationSeconds}
             enableToneAnalysis={enableToneAnalysis}
             onToggleToneAnalysis={() => setEnableToneAnalysis((v) => !v)}
             statusMessage={statusMessage}
             isMuted={isMuted}
-            micLevel={micLevel}
-            aiSpeaking={aiSpeaking}
+            orbWrapperRef={orbWrapperRef}
+            orbCircleRef={orbCircleRef}
             liveVocabPopups={liveVocabPopups}
             dueVocabulary={data.dueVocabulary}
             vocabQuizWords={vocabQuizWords}
@@ -717,7 +710,6 @@ export default function App() {
           <VocabularyView
             allVocabulary={data.allVocabulary}
             dueVocabulary={data.dueVocabulary}
-            dueCount={data.dueVocabulary.length}
             onAddVocabulary={handleAddVocabulary}
             onReviewVocabulary={handleManualVocabReview}
             onStartVocabQuiz={(words) => startCall(undefined, '', words)}
@@ -748,16 +740,15 @@ export default function App() {
               personaEditorDialogRef.current?.showModal();
             }}
             onDeletePersona={async (personaId) => {
-              const res = await fetch(`/api/personas/${encodeURIComponent(personaId)}`, {
-                method: 'DELETE',
-              });
-              const json = await res.json();
-              if (!res.ok) {
-                setErrorMessage(json.error || 'Person konnte nicht gelöscht werden.');
-                return;
+              try {
+                await apiFetch(`/api/personas/${encodeURIComponent(personaId)}`, {
+                  method: 'DELETE',
+                });
+                showToast('Person entfernt.');
+                await fetchBootstrap();
+              } catch (err: unknown) {
+                setErrorMessage(getErrorMessage(err, 'Person konnte nicht gelöscht werden.'));
               }
-              showToast('Person entfernt.');
-              await fetchBootstrap();
             }}
             onOpenOnboarding={() => {
               setIsOnboardingOpen(true);
@@ -801,12 +792,8 @@ export default function App() {
         <DeleteAccountDialog
           dialogRef={deleteAccountDialogRef}
           userEmail={currentUser.email}
-          onClose={() => {}}
           onDeleted={() => {
-            audioRef.current?.stopAll();
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-              wsRef.current.close();
-            }
+            stopSession();
             setCallState('idle');
             hasAutoOpenedOnboardingRef.current = false;
             setCurrentUser(null);

@@ -1,7 +1,8 @@
-import React, { useEffect, useId } from 'react';
+import React, { useId } from 'react';
 import { formatFactCategoryDe } from '../labels.ts';
 import { SessionReflection } from '../types.ts';
 import { formatDurationDe } from './HomeView.tsx';
+import { ModalDialog } from './ModalDialog.tsx';
 
 interface SessionRecapDialogProps {
   dialogRef: React.RefObject<HTMLDialogElement | null>;
@@ -11,45 +12,8 @@ interface SessionRecapDialogProps {
 export function SessionRecapDialog({ dialogRef, recap }: SessionRecapDialogProps) {
   const titleId = useId();
 
-  // Light-dismiss fallback for browsers without native HTMLDialogElement.prototype.closedBy
-  useEffect(() => {
-    if (typeof window === 'undefined' || !('HTMLDialogElement' in window)) return;
-    if ('closedBy' in HTMLDialogElement.prototype) return;
-
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-
-    let pressedOutside = false;
-    const isOutside = (e: PointerEvent) => {
-      const r = dialog.getBoundingClientRect();
-      return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
-    };
-    const onPointerDown = (e: PointerEvent) => {
-      if (e.target !== dialog) {
-        pressedOutside = false;
-        return;
-      }
-      pressedOutside = isOutside(e);
-    };
-    const onPointerUp = (e: PointerEvent) => {
-      if (e.target === dialog && pressedOutside && isOutside(e)) {
-        dialog.close();
-      }
-    };
-    dialog.addEventListener('pointerdown', onPointerDown);
-    dialog.addEventListener('pointerup', onPointerUp);
-    return () => {
-      dialog.removeEventListener('pointerdown', onPointerDown);
-      dialog.removeEventListener('pointerup', onPointerUp);
-    };
-  }, [dialogRef]);
-
   return (
-    <dialog
-      ref={dialogRef}
-      {...({ closedby: 'any' } as any)}
-      aria-labelledby={titleId}
-    >
+    <ModalDialog dialogRef={dialogRef} aria-labelledby={titleId}>
       <div
         style={{
           display: 'flex',
@@ -143,6 +107,6 @@ export function SessionRecapDialog({ dialogRef, recap }: SessionRecapDialogProps
           Schließen
         </button>
       </form>
-    </dialog>
+    </ModalDialog>
   );
 }

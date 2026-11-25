@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ArrowLeft,
   Clock,
@@ -18,20 +18,46 @@ import {
   VocabularyWord,
 } from '../types.ts';
 
+function CallDurationBadge({ isActive }: { isActive: boolean }) {
+  const [seconds, setSeconds] = useState(0);
+
+  useEffect(() => {
+    if (!isActive) {
+      setSeconds(0);
+      return;
+    }
+    setSeconds(0);
+    const id = window.setInterval(() => {
+      setSeconds((prev) => prev + 1);
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [isActive]);
+
+  if (!isActive) return null;
+  const mins = String(Math.floor(seconds / 60)).padStart(2, '0');
+  const secs = String(seconds % 60).padStart(2, '0');
+
+  return (
+    <span className="badge badge-gold">
+      <Clock size={12} aria-hidden="true" />
+      {mins}:{secs}
+    </span>
+  );
+}
+
 interface FreeTalkViewProps {
   personas: Persona[];
-  selectedPersona: Persona;
+  selectedPersona?: Persona;
   selectedScenario?: CurriculumScenario;
   suggestedTopic: string;
   isShufflingTopic?: boolean;
   callState: 'idle' | 'connecting' | 'in_call' | 'analyzing';
-  callDurationSeconds: number;
   enableToneAnalysis: boolean;
   onToggleToneAnalysis: () => void;
   statusMessage: string;
   isMuted: boolean;
-  micLevel: number;
-  aiSpeaking: boolean;
+  orbWrapperRef: React.RefObject<HTMLDivElement | null>;
+  orbCircleRef: React.RefObject<HTMLDivElement | null>;
   liveVocabPopups: VocabularyWord[];
   dueVocabulary: VocabularyWord[];
   vocabQuizWords?: VocabularyWord[];
@@ -57,13 +83,12 @@ export function FreeTalkView({
   suggestedTopic,
   isShufflingTopic,
   callState,
-  callDurationSeconds,
   enableToneAnalysis,
   onToggleToneAnalysis,
   statusMessage,
   isMuted,
-  micLevel,
-  aiSpeaking,
+  orbWrapperRef,
+  orbCircleRef,
   liveVocabPopups,
   dueVocabulary,
   vocabQuizWords = [],
@@ -86,8 +111,23 @@ export function FreeTalkView({
   const displayedVocab =
     liveVocabPopups.length > 0 ? liveVocabPopups : dueVocabulary.slice(0, 4);
 
-  const mins = String(Math.floor(callDurationSeconds / 60)).padStart(2, '0');
-  const secs = String(callDurationSeconds % 60).padStart(2, '0');
+  if (!selectedPersona) {
+    return (
+      <section aria-label="Free Talk">
+        <div className="subpage-back-row">
+          <button type="button" className="btn-back-home" onClick={onBackHome}>
+            <ArrowLeft size={15} aria-hidden="true" />
+            Zurück zur Startseite
+          </button>
+        </div>
+        <div className="card">
+          <p style={{ margin: 0, color: 'var(--text-muted)' }}>
+            Noch kein Gesprächspartner angelegt. Lege zuerst im Bereich „Gedächtnis“ eine Person an.
+          </p>
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section aria-label="Free Talk">
@@ -124,15 +164,10 @@ export function FreeTalkView({
         )}
 
         <div
+          ref={orbWrapperRef}
           className="voice-orb-wrapper"
-          style={
-            {
-              '--orb-scale': callState === 'in_call' ? micLevel : 0,
-              '--orb-glow': callState === 'in_call' ? micLevel : 0,
-            } as React.CSSProperties
-          }
         >
-          <div className={`voice-orb ${aiSpeaking ? 'ai-speaking' : ''}`}>
+          <div ref={orbCircleRef} className="voice-orb">
             <span aria-hidden="true">{selectedPersona.avatar_emoji}</span>
           </div>
         </div>
@@ -204,12 +239,7 @@ export function FreeTalkView({
         ) : (
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', flexWrap: 'wrap', justifyContent: 'center' }}>
-              {callState === 'in_call' && (
-                <span className="badge badge-gold">
-                  <Clock size={12} aria-hidden="true" />
-                  {mins}:{secs}
-                </span>
-              )}
+              <CallDurationBadge isActive={callState === 'in_call'} />
               {callState === 'in_call' && enableToneAnalysis && (
                 <span className="badge badge-emerald">Ton-Analyse aktiv</span>
               )}

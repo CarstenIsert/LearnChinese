@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { Sparkles, X } from 'lucide-react';
+import { getErrorMessage } from '../api.ts';
 import { Persona } from '../types.ts';
+import { ModalDialog } from './ModalDialog.tsx';
 
 interface PersonaEditorDialogProps {
   dialogRef: React.RefObject<HTMLDialogElement | null>;
@@ -119,25 +121,19 @@ export function PersonaEditorDialog({
       onSaved(json.persona);
       dialogRef.current?.close();
       onClose();
-    } catch (err: any) {
-      setError(err?.message || 'Fehler beim Speichern.');
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, 'Fehler beim Speichern.'));
     } finally {
       setIsSaving(false);
     }
   };
 
   return (
-    <dialog
-      ref={dialogRef}
-      closedby="any"
+    <ModalDialog
+      dialogRef={dialogRef}
+      isOpen={isOpen}
+      onClose={onClose}
       aria-labelledby="persona-editor-title"
-      onCancel={onClose}
-      onClick={(e) => {
-        if (e.target === dialogRef.current) {
-          dialogRef.current.close();
-          onClose();
-        }
-      }}
     >
       <div className="dialog-header">
         <div>
@@ -300,6 +296,6 @@ export function PersonaEditorDialog({
           </button>
         </div>
       </form>
-    </dialog>
+    </ModalDialog>
   );
 }

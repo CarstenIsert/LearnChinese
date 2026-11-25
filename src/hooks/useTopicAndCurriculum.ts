@@ -90,8 +90,8 @@ export function useTopicAndCurriculum({
           recentTopicsRef.current = [json.topic, ...recentTopicsRef.current].slice(0, 8);
         }
       }
-    } catch (err: any) {
-      if (err?.name !== 'AbortError') {
+    } catch (err: unknown) {
+      if (!(err instanceof Error && err.name === 'AbortError')) {
         // Keep instant fallback topic
       }
     } finally {

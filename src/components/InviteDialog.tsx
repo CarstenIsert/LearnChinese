@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Check, Copy, Plus, X } from 'lucide-react';
+import { apiFetch, getErrorMessage } from '../api.ts';
 import { InviteCode } from '../types.ts';
+import { ModalDialog } from './ModalDialog.tsx';
 
 interface InviteDialogProps {
   dialogRef: React.RefObject<HTMLDialogElement | null>;
@@ -19,12 +21,10 @@ export function InviteDialog({ dialogRef, isOpen, onClose }: InviteDialogProps) 
     setIsLoading(true);
     setError('');
     try {
-      const res = await fetch('/api/auth/invites');
-      if (!res.ok) throw new Error('Konnte Einladungen nicht laden.');
-      const data = (await res.json()) as { invites: InviteCode[] };
+      const data = await apiFetch<{ invites: InviteCode[] }>('/api/auth/invites');
       setInvites(data.invites || []);
-    } catch (err: any) {
-      setError(err?.message || 'Fehler beim Laden.');
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, 'Konnte Einladungen nicht laden.'));
     } finally {
       setIsLoading(false);
     }
@@ -40,15 +40,13 @@ export function InviteDialog({ dialogRef, isOpen, onClose }: InviteDialogProps) 
     setIsCreating(true);
     setError('');
     try {
-      const res = await fetch('/api/auth/invites', {
+      await apiFetch('/api/auth/invites', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ expiresInDays: 7 }),
       });
-      if (!res.ok) throw new Error('Einladung konnte nicht erstellt werden.');
       await loadInvites();
-    } catch (err: any) {
-      setError(err?.message || 'Fehler beim Erstellen.');
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, 'Einladung konnte nicht erstellt werden.'));
     } finally {
       setIsCreating(false);
     }
@@ -67,17 +65,11 @@ export function InviteDialog({ dialogRef, isOpen, onClose }: InviteDialogProps) 
   };
 
   return (
-    <dialog
-      ref={dialogRef}
-      closedby="any"
+    <ModalDialog
+      dialogRef={dialogRef}
+      isOpen={isOpen}
+      onClose={onClose}
       aria-labelledby="invite-dialog-title"
-      onCancel={onClose}
-      onClick={(e) => {
-        if (e.target === dialogRef.current) {
-          dialogRef.current.close();
-          onClose();
-        }
-      }}
     >
       <div className="dialog-header">
         <div>
@@ -165,6 +157,6 @@ export function InviteDialog({ dialogRef, isOpen, onClose }: InviteDialogProps) 
           })}
         </ul>
       )}
-    </dialog>
+    </ModalDialog>
   );
 }

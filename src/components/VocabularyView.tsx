@@ -13,6 +13,7 @@ import {
   Square,
   Volume2,
 } from 'lucide-react';
+import { getErrorMessage } from '../api.ts';
 import { VocabularyWord } from '../types.ts';
 
 interface PronunciationResult {
@@ -25,7 +26,6 @@ interface PronunciationResult {
 interface VocabularyViewProps {
   allVocabulary: VocabularyWord[];
   dueVocabulary: VocabularyWord[];
-  dueCount: number;
   onAddVocabulary: (hanzi: string, pinyin: string, german: string) => Promise<void>;
   onReviewVocabulary: (
     simplifiedHanzi: string,
@@ -40,6 +40,20 @@ type CardDirection = 'zh-to-de' | 'de-to-zh';
 
 let activeAudio: HTMLAudioElement | null = null;
 const audioVersionMap = new Map<string, number>();
+
+function fisherYatesShuffle<T>(items: T[], seed: number): T[] {
+  const copy = [...items];
+  let s = (seed || 1) >>> 0;
+  const nextRand = () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 0x100000000;
+  };
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(nextRand() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
 
 function pickWeakRandomWords(words: VocabularyWord[], count: number): VocabularyWord[] {
   if (words.length === 0) return [];
@@ -110,7 +124,6 @@ async function speakMandarin(
 export function VocabularyView({
   allVocabulary,
   dueVocabulary,
-  dueCount,
   onAddVocabulary,
   onReviewVocabulary,
   onStartVocabQuiz,
@@ -156,6 +169,11 @@ export function VocabularyView({
   useEffect(() => {
     return () => {
       stopMediaTracks();
+      if (activeAudio) {
+        activeAudio.pause();
+        activeAudio.currentTime = 0;
+        activeAudio = null;
+      }
     };
   }, []);
 
@@ -165,12 +183,13 @@ export function VocabularyView({
   const [newVocabPinyin, setNewVocabPinyin] = useState<string>('');
   const [newVocabGerman, setNewVocabGerman] = useState<string>('');
 
-  const allVocabularyRef = useRef(allVocabulary);
-  allVocabularyRef.current = allVocabulary;
+  const [weakRandomIds, setWeakRandomIds] = useState<number[]>(() =>
+    pickWeakRandomWords(allVocabulary, 20).map((w) => w.id)
+  );
 
-  const weakRandomIds = useMemo(() => {
-    return pickWeakRandomWords(allVocabularyRef.current, weakBatchSize).map((w) => w.id);
-    // Re-draw only when switching to/refreshing weak_random, changing batch size, or vocab count changes
+  useEffect(() => {
+    setWeakRandomIds(pickWeakRandomWords(allVocabulary, weakBatchSize).map((w) => w.id));
+    // Re-draw when user requests a new weak-random selection, changes batch size, or vocab count changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [weakRandomSeed, weakBatchSize, allVocabulary.length]);
 
@@ -190,7 +209,7 @@ export function VocabularyView({
     }
 
     if (shuffleSeed > 0 && deckFilter !== 'weak_random') {
-      base = [...base].sort(() => Math.random() - 0.5);
+      base = fisherYatesShuffle(base, shuffleSeed);
     }
     return base;
   }, [allVocabulary, deckFilter, dueVocabulary, shuffleSeed, weakRandomIds]);
@@ -292,8 +311,8 @@ export function VocabularyView({
 
           const result = (await resp.json()) as PronunciationResult;
           setPronunciationResult(result);
-        } catch (err: any) {
-          setPronunciationError(err?.message || 'Fehler bei der Aussprache-Prüfung.');
+        } catch (err: unknown) {
+          setPronunciationError(getErrorMessage(err, 'Fehler bei der Aussprache-Prüfung.'));
         } finally {
           setIsCheckingPronunciation(false);
         }
@@ -306,11 +325,11 @@ export function VocabularyView({
           mediaRecorderRef.current.stop();
         }
       }, 6000);
-    } catch (err: any) {
+    } catch (err: unknown) {
       stopMediaTracks();
       setIsRecording(false);
       setPronunciationError(
-        `Mikrofonzugriff fehlgeschlagen: ${err?.message || 'Bitte Mikrofon erlauben.'}`
+        `Mikrofonzugriff fehlgeschlagen: ${getErrorMessage(err, 'Bitte Mikrofon erlauben.')}`
       );
     }
   };
@@ -345,6 +364,11 @@ export function VocabularyView({
     setNewVocabGerman('');
   };
 
+  const strugglingCount = useMemo(
+    () => allVocabulary.filter((w) => w.streak === 0).length,
+    [allVocabulary]
+  );
+
   return (
     <section aria-label="Vokabeln">
       <div className="vocab-mode-bar">
@@ -357,7 +381,7 @@ export function VocabularyView({
             onClick={() => setMode('trainer')}
           >
             <GraduationCap size={15} aria-hidden="true" />
-            Vokabeltrainer ({dueCount} fällig)
+            Vokabeltrainer ({dueVocabulary.length} fällig)
           </button>
           <button
             type="button"
@@ -398,7 +422,7 @@ export function VocabularyView({
                 className={`partner-pill ${deckFilter === 'struggling' ? 'active' : ''}`}
                 onClick={() => resetTrainer('struggling')}
               >
-                Neu / Schwierig ({allVocabulary.filter((w) => w.streak === 0).length})
+                Neu / Schwierig ({strugglingCount})
               </button>
               <button
                 type="button"
@@ -760,7 +784,7 @@ export function VocabularyView({
             <div className="panel-card">
               <h2>Vokabeln durchsuchen</h2>
               <p style={{ fontSize: '0.86rem', color: 'var(--text-muted)', marginBlockStart: 0 }}>
-                {dueCount} Wörter stehen aktuell zur Wiederholung im Gespräch an.
+                {dueVocabulary.length} Wörter stehen aktuell zur Wiederholung im Gespräch an.
               </p>
               <search>
                 <input

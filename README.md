@@ -23,11 +23,12 @@ This project is hosted in a **public GitHub repository**. To keep personal detai
   * **Progressive HSK 3 & HSK 4 Curriculum:** Starts with core everyday scenarios and gradually expands with HSK 3 and HSK 4 topics (`server/curriculum.ts`)—both automatically as you practice and on-demand via *"HSK 3 erweitern"* / *"HSK 4 erweitern"* (including AI-generated follow-up scenarios once curated stages are unlocked).
   * **Live Pop-up Flashcards (简体 + Pinyin + Deutsch):** Whenever a word is explained in German or introduced during a call, `gemini-3.8-live` triggers `save_vocab` in real time to pop up a flashcard on screen.
   * **Blurred / Peekable Live Transcript:** Blurred by default so you train your ear rather than reading along, with a one-click *"Anzeigen / Ausblenden"* toggle.
-* **4-Pillar Memory Layer (SQLite + `gemini-3.8-flash` Reflection):**
-  1. **Semantic Fact Memory (`memory_facts`):** Shared across all conversation partners so they remember what you talked about in previous sessions.
+* **4-Pillar Memory Layer (SQLite + `gemini-3.8-flash` Reflection + `gemini-embedding-001` Retrieval):**
+  1. **Tiered & Consolidated Semantic Fact Memory (`memory_facts`):** Shared across all conversation partners. Facts are classified as `core` (enduring identity/family/hobbies) or `episodic` (trips/events) and automatically updated or archived during post-session reflection to prevent duplicate bloat.
   2. **Episodic Relationship Diary (`persona_episodes`):** Rolling summary of your past chats with each specific partner + a follow-up hook for your next conversation.
-  3. **Linguistic & Grammar Skill Memory (`learner_skill_memory`):** Tracks HSK 3/4 structures you are practicing or struggling with.
-  4. **Spaced Repetition (SRS) Vocabulary (`vocabulary`):** Tracks passive recognition vs. active spoken use and weaves due words into each conversation.
+  3. **Bounded Session-Start Retrieval (`server/memory.ts`):** Instead of dumping all history into every call, each session starts with a fixed-budget mix of `core` facts, recent context, semantically relevant older facts/episodes (via 256-dim `gemini-embedding-001` embeddings), and a spaced-recall "throwback" memory (`last_referenced_at`) so older topics resurface naturally.
+  4. **Linguistic & Grammar Skill Memory (`learner_skill_memory`):** Tracks HSK 3/4 structures you are practicing or struggling with.
+  5. **Spaced Repetition (SRS) Vocabulary (`vocabulary`):** Tracks passive recognition vs. active spoken use and weaves due words into each conversation.
 
 ---
 

@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { AlertTriangle, Trash2, X } from 'lucide-react';
+import { ModalDialog } from './ModalDialog.tsx';
 
 interface DeleteAccountDialogProps {
   dialogRef: React.RefObject<HTMLDialogElement | null>;
   userEmail: string;
-  onClose: () => void;
+  onClose?: () => void;
   onDeleted: () => void;
 }
 
@@ -18,37 +19,15 @@ export function DeleteAccountDialog({
   const [error, setError] = useState('');
   const [isDeleting, setIsDeleting] = useState(false);
 
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    const handleCancel = (e: Event) => {
-      e.preventDefault();
-      dialog.close();
-      setPassword('');
-      setError('');
-      onClose();
-    };
-    const handleClick = (e: MouseEvent) => {
-      if (e.target === dialog) {
-        dialog.close();
-        setPassword('');
-        setError('');
-        onClose();
-      }
-    };
-    dialog.addEventListener('cancel', handleCancel);
-    dialog.addEventListener('click', handleClick);
-    return () => {
-      dialog.removeEventListener('cancel', handleCancel);
-      dialog.removeEventListener('click', handleClick);
-    };
-  }, [dialogRef, onClose]);
+  const handleClose = useCallback(() => {
+    setPassword('');
+    setError('');
+    onClose?.();
+  }, [onClose]);
 
   const closeDialog = () => {
     dialogRef.current?.close();
-    setPassword('');
-    setError('');
-    onClose();
+    handleClose();
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -77,11 +56,11 @@ export function DeleteAccountDialog({
   };
 
   return (
-    <dialog
-      ref={dialogRef}
+    <ModalDialog
+      dialogRef={dialogRef}
       className="delete-account-dialog"
       aria-labelledby="delete-account-title"
-      closedby="any"
+      onClose={handleClose}
     >
       <div className="dialog-header">
         <h2 id="delete-account-title">Konto unwiderruflich löschen</h2>
@@ -128,6 +107,6 @@ export function DeleteAccountDialog({
           </button>
         </div>
       </form>
-    </dialog>
+    </ModalDialog>
   );
 }

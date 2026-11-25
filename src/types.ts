@@ -197,3 +197,44 @@ export interface InviteCode {
   used_at: string | null;
   created_at: string;
 }
+
+export type ServerWsMessage =
+  | { type: 'status'; status: string; message?: string }
+  | {
+      type: 'session_started';
+      sessionId: number | null;
+      personaId: string;
+      voiceName: string;
+      isOnboarding: boolean;
+    }
+  | { type: 'audio_chunk'; data: string; mimeType?: string }
+  | { type: 'interrupted' }
+  | {
+      type: 'transcript_delta';
+      speaker: 'user' | 'ai';
+      text: string;
+      fullTurnText?: string;
+    }
+  | { type: 'transcript_turn_complete'; speaker: 'user' | 'ai'; text: string }
+  | { type: 'turn_complete' }
+  | { type: 'vocab_card_popup'; word: VocabularyWord }
+  | {
+      type: 'vocab_review_recorded';
+      simplified_hanzi: string;
+      outcome: 'used_actively' | 'recognized' | 'forgotten';
+      word: VocabularyWord | null;
+    }
+  | { type: 'memory_saved_toast'; fact: { id: number; category: string; fact: string } }
+  | { type: 'analyzing_session'; message?: string }
+  | {
+      type: 'session_recap';
+      sessionId: number | null;
+      transcript: TranscriptTurn[];
+      reflection: SessionReflection;
+    }
+  | { type: 'onboarding_profile_updated'; profile: LearnerProfile }
+  | { type: 'onboarding_person_saved'; persona: Persona }
+  | { type: 'onboarding_completed'; summary_de?: string }
+  | { type: 'onboarding_session_ended' }
+  | { type: 'gemini_closed' }
+  | { type: 'error'; message?: string };

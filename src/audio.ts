@@ -131,7 +131,7 @@ export class LiveAudioManager {
       this.outputContext = new AudioContext({ sampleRate: 24000 });
     }
     if (this.outputContext.state === 'suspended') {
-      this.outputContext.resume();
+      this.outputContext.resume().catch(() => {});
     }
 
     const rawBytes = base64ToUint8Array(base64Data);
@@ -213,7 +213,7 @@ export class LiveAudioManager {
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   let binary = '';
-  const chunkSize = 0x8000;
+  const chunkSize = 0x4000;
   for (let i = 0; i < bytes.length; i += chunkSize) {
     binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
   }

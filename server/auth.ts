@@ -1,8 +1,15 @@
 import crypto from 'node:crypto';
+import { promisify } from 'node:util';
 import type { NextFunction, Request, Response } from 'express';
 import { Router } from 'express';
 import type http from 'node:http';
 import { db, deleteUserAccount, seedUserWorkspace } from './db.ts';
+
+const scryptAsync = promisify(crypto.scrypt) as (
+  password: string | Buffer,
+  salt: string | Buffer,
+  keylen: number
+) => Promise<Buffer>;
 
 export const SESSION_COOKIE_NAME = 'lc_session';
 const SESSION_TTL_DAYS = 30;
@@ -32,17 +39,17 @@ function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
-function hashPassword(password: string): string {
+async function hashPassword(password: string): Promise<string> {
   const salt = crypto.randomBytes(16).toString('hex');
-  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
+  const derived = (await scryptAsync(password, salt, 64)).toString('hex');
   return `${salt}:${derived}`;
 }
 
-function verifyPassword(password: string, storedHash: string): boolean {
+async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
   const [salt, expectedHex] = storedHash.split(':');
   if (!salt || !expectedHex) return false;
   const expected = Buffer.from(expectedHex, 'hex');
-  const actual = crypto.scryptSync(password, salt, 64);
+  const actual = await scryptAsync(password, salt, 64);
   if (expected.length !== actual.length) return false;
   return crypto.timingSafeEqual(expected, actual);
 }
@@ -178,10 +185,6 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction): v
 }
 
 // Simple in-memory rate limiter for auth and AI endpoints
-const authRateMap = new Map<string, { count: number; resetAt: number }>();
-const AUTH_WINDOW_MS = 15 * 60 * 1000;
-const AUTH_MAX_ATTEMPTS = 25;
-
 export function createInMemoryRateLimiter(options: {
   windowMs: number;
   maxRequests: number;
@@ -230,39 +233,18 @@ export function createInMemoryRateLimiter(options: {
   };
 }
 
-function authRateLimit(req: Request, res: Response, next: NextFunction): void {
-  const ip = req.ip || req.socket.remoteAddress || 'unknown';
-  const now = Date.now();
-
-  if (authRateMap.size > 1000) {
-    for (const [key, entry] of authRateMap.entries()) {
-      if (entry.resetAt <= now) {
-        authRateMap.delete(key);
-      }
-    }
-  }
-
-  const existing = authRateMap.get(ip);
-
-  if (!existing || existing.resetAt <= now) {
-    authRateMap.set(ip, { count: 1, resetAt: now + AUTH_WINDOW_MS });
-    next();
-    return;
-  }
-
-  if (existing.count >= AUTH_MAX_ATTEMPTS) {
-    res.status(429).json({ error: 'Too many authentication attempts. Please try again later.' });
-    return;
-  }
-
-  existing.count += 1;
-  next();
-}
+const authLimiter = createInMemoryRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  maxRequests: 25,
+  errorMessage: 'Too many authentication attempts. Please try again later.',
+});
+const authRateLimit = (req: Request, res: Response, next: NextFunction) =>
+  authLimiter.middleware(req, res, next);
 
 const registerUserTx = db.transaction(
   (input: {
     email: string;
-    password: string;
+    passwordHash: string;
     displayName: string;
     inviteCode?: string;
     bootstrapToken?: string;
@@ -306,12 +288,11 @@ const registerUserTx = db.transaction(
       }
     }
 
-    const passwordHash = hashPassword(input.password);
     const result = db
       .prepare(
         `INSERT INTO users (email, password_hash, display_name, role) VALUES (?, ?, ?, ?)`
       )
-      .run(email, passwordHash, input.displayName.trim(), role);
+      .run(email, input.passwordHash, input.displayName.trim(), role);
 
     const newUserId = Number(result.lastInsertRowid);
 
@@ -359,8 +340,8 @@ export function createAuthRouter(): Router {
     });
   });
 
-  router.post('/register', authRateLimit, (req, res) => {
-    const { email, password, displayName, inviteCode, bootstrapToken } = req.body as {
+  router.post('/register', authRateLimit, async (req, res) => {
+    const { email, password, displayName, inviteCode, bootstrapToken } = (req.body || {}) as {
       email?: string;
       password?: string;
       displayName?: string;
@@ -368,14 +349,14 @@ export function createAuthRouter(): Router {
       bootstrapToken?: string;
     };
 
-    const trimmedName = displayName?.trim() || '';
-    const trimmedEmail = email?.trim() || '';
+    const trimmedName = typeof displayName === 'string' ? displayName.trim() : '';
+    const trimmedEmail = typeof email === 'string' ? email.trim() : '';
     const isEmailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail) && trimmedEmail.length <= 254;
     if (
       !isEmailValid ||
       !trimmedName ||
       trimmedName.length > 80 ||
-      !password ||
+      typeof password !== 'string' ||
       password.length < 8 ||
       password.length > 128
     ) {
@@ -387,9 +368,10 @@ export function createAuthRouter(): Router {
     }
 
     try {
+      const passwordHash = await hashPassword(password);
       const created = registerUserTx({
         email: trimmedEmail,
-        password,
+        passwordHash,
         displayName: trimmedName,
         inviteCode,
         bootstrapToken,
@@ -413,44 +395,55 @@ export function createAuthRouter(): Router {
     }
   });
 
-  router.post('/login', authRateLimit, (req, res) => {
-    const { email, password } = req.body as { email?: string; password?: string };
-    if (!email || !password || email.length > 254 || password.length > 128) {
-      res.status(400).json({ error: 'Email and password are required.' });
-      return;
+  router.post('/login', authRateLimit, async (req, res, next) => {
+    try {
+      const { email, password } = (req.body || {}) as { email?: string; password?: string };
+      if (
+        typeof email !== 'string' ||
+        typeof password !== 'string' ||
+        !email ||
+        !password ||
+        email.length > 254 ||
+        password.length > 128
+      ) {
+        res.status(400).json({ error: 'Email and password are required.' });
+        return;
+      }
+
+      const row = db
+        .prepare(
+          `SELECT id, email, password_hash, display_name, role, created_at FROM users WHERE email = ?`
+        )
+        .get(normalizeEmail(email)) as
+        | {
+            id: number;
+            email: string;
+            password_hash: string;
+            display_name: string;
+            role: 'admin' | 'user';
+            created_at: string;
+          }
+        | undefined;
+
+      if (!row || !(await verifyPassword(password, row.password_hash))) {
+        res.status(401).json({ error: 'Invalid email or password.' });
+        return;
+      }
+
+      const token = createAuthSession(row.id);
+      setSessionCookie(res, token, req);
+      res.json({
+        user: {
+          id: row.id,
+          email: row.email,
+          displayName: row.display_name,
+          role: row.role,
+          createdAt: row.created_at,
+        },
+      });
+    } catch (err) {
+      next(err);
     }
-
-    const row = db
-      .prepare(
-        `SELECT id, email, password_hash, display_name, role, created_at FROM users WHERE email = ?`
-      )
-      .get(normalizeEmail(email)) as
-      | {
-          id: number;
-          email: string;
-          password_hash: string;
-          display_name: string;
-          role: 'admin' | 'user';
-          created_at: string;
-        }
-      | undefined;
-
-    if (!row || !verifyPassword(password, row.password_hash)) {
-      res.status(401).json({ error: 'Invalid email or password.' });
-      return;
-    }
-
-    const token = createAuthSession(row.id);
-    setSessionCookie(res, token, req);
-    res.json({
-      user: {
-        id: row.id,
-        email: row.email,
-        displayName: row.display_name,
-        role: row.role,
-        createdAt: row.created_at,
-      },
-    });
   });
 
   router.post('/logout', (req, res) => {
@@ -463,30 +456,34 @@ export function createAuthRouter(): Router {
     res.json({ ok: true });
   });
 
-  router.delete('/account', requireAuth, (req, res) => {
-    const { password } = (req.body || {}) as { password?: string };
-    if (!password || typeof password !== 'string') {
-      res.status(400).json({ error: 'Bitte gib zur Bestätigung dein Passwort ein.' });
-      return;
+  router.delete('/account', requireAuth, async (req, res, next) => {
+    try {
+      const { password } = (req.body || {}) as { password?: string };
+      if (!password || typeof password !== 'string') {
+        res.status(400).json({ error: 'Bitte gib zur Bestätigung dein Passwort ein.' });
+        return;
+      }
+
+      const row = db
+        .prepare(`SELECT id, password_hash FROM users WHERE id = ?`)
+        .get(req.user!.id) as { id: number; password_hash: string } | undefined;
+
+      if (!row || !(await verifyPassword(password, row.password_hash))) {
+        res.status(401).json({ error: 'Passwort ist nicht korrekt.' });
+        return;
+      }
+
+      const result = deleteUserAccount(req.user!.id);
+      if (!result.ok) {
+        res.status(400).json({ error: result.error || 'Konto konnte nicht gelöscht werden.' });
+        return;
+      }
+
+      clearSessionCookie(res, req);
+      res.json({ ok: true });
+    } catch (err) {
+      next(err);
     }
-
-    const row = db
-      .prepare(`SELECT id, password_hash FROM users WHERE id = ?`)
-      .get(req.user!.id) as { id: number; password_hash: string } | undefined;
-
-    if (!row || !verifyPassword(password, row.password_hash)) {
-      res.status(401).json({ error: 'Passwort ist nicht korrekt.' });
-      return;
-    }
-
-    const result = deleteUserAccount(req.user!.id);
-    if (!result.ok) {
-      res.status(400).json({ error: result.error || 'Konto konnte nicht gelöscht werden.' });
-      return;
-    }
-
-    clearSessionCookie(res, req);
-    res.json({ ok: true });
   });
 
   router.get('/invites', requireAuth, requireAdmin, (_req, res) => {
@@ -503,7 +500,10 @@ export function createAuthRouter(): Router {
   router.post('/invites', requireAuth, requireAdmin, (req, res) => {
     const { expiresInDays } = (req.body || {}) as { expiresInDays?: number };
     const code = crypto.randomBytes(6).toString('hex');
-    const days = typeof expiresInDays === 'number' && expiresInDays > 0 ? expiresInDays : 7;
+    const days =
+      typeof expiresInDays === 'number' && Number.isFinite(expiresInDays) && expiresInDays > 0
+        ? Math.min(365, Math.max(1, Math.round(expiresInDays)))
+        : 7;
     const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 
     db.prepare(

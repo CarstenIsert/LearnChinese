@@ -20,7 +20,8 @@ All AI coding assistants and contributors MUST follow these rules strictly:
   - Keeps `GEMINI_API_KEY` strictly on the server (loaded from `.env`).
   - Proxies low-latency bidirectional PCM audio (16kHz input, 24kHz output) and live tool calls (`save_vocab`, `record_vocab_review`, `remember_fact`) to the Gemini Multimodal Live API (`gemini-3.8-live`) via `@google/genai`.
   - Provides current/seasonal topic generation (`POST /api/topics/suggest`) and progressive HSK 3 & HSK 4 curriculum expansion (`POST /api/curriculum/expand`) via `server/curriculum.ts`.
-  - Runs a Post-Session Reflection pipeline (`gemini-3.8-flash`) after each call to extract new semantic facts, episodic relationship hooks, grammar/skill observations, SRS vocabulary review updates, and automatic curriculum progression.
+  - Runs a bounded session-start memory selection pipeline (`server/memory.ts`) combining `core` facts, recent facts/episodes, semantically relevant older memories (`gemini-embedding-001`, 256-dim vectors stored in SQLite), and spaced-recall "throwback" memories (`last_referenced_at`).
+  - Runs a Post-Session Reflection pipeline (`gemini-3.8-flash`) after each call to extract/consolidate semantic facts (`new_facts` with `core`/`episodic` tiers, `updated_facts`, `archived_fact_ids`), episodic relationship hooks, grammar/skill observations, SRS vocabulary review updates, automatic curriculum progression, and background embedding backfill.
 - **Database:** Local SQLite (`better-sqlite3`) stored at `data/tutor.db`.
 
 ## Server Deployment & Data Migration

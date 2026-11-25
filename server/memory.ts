@@ -1,4 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
+import { getGeminiClient, isValidApiKey } from './services/geminiClient.ts';
 import {
   DEFAULT_USER_ID,
   getActiveMemoryFactsWithEmbeddings,
@@ -46,7 +46,7 @@ function parseEmbedding(raw: string | null): number[] | null {
   }
 }
 
-export function cosineSimilarity(a: number[], b: number[]): number {
+function cosineSimilarity(a: number[], b: number[]): number {
   if (a.length === 0 || a.length !== b.length) return 0;
   let dot = 0;
   let normA = 0;
@@ -64,11 +64,11 @@ async function generateEmbeddingsBatch(
   apiKey: string,
   texts: string[]
 ): Promise<Array<number[] | null>> {
-  if (!apiKey || apiKey === 'your_gemini_api_key_here' || texts.length === 0) {
+  if (!isValidApiKey(apiKey) || texts.length === 0) {
     return texts.map(() => null);
   }
   try {
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = getGeminiClient(apiKey);
     const response = await ai.models.embedContent({
       model: EMBEDDING_MODEL,
       contents: texts,
@@ -93,7 +93,7 @@ export async function ensureMissingEmbeddings(
   userId = DEFAULT_USER_ID,
   maxPerTable = 25
 ): Promise<void> {
-  if (!apiKey || apiKey === 'your_gemini_api_key_here') return;
+  if (!isValidApiKey(apiKey)) return;
 
   const missingFacts = getActiveMemoryFactsWithEmbeddings(userId)
     .filter((f) => !f.embedding)
@@ -167,7 +167,9 @@ export async function selectSessionMemoryContext(params: {
   const { apiKey, personaId, queryText, userId = DEFAULT_USER_ID } = params;
 
   if (apiKey) {
-    await ensureMissingEmbeddings(apiKey, userId, 20);
+    void ensureMissingEmbeddings(apiKey, userId, 20).catch((err) => {
+      console.warn('Background embedding backfill skipped:', err instanceof Error ? err.message : err);
+    });
   }
 
   const allFacts = getActiveMemoryFactsWithEmbeddings(userId);

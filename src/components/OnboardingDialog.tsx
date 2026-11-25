@@ -1,7 +1,9 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Check, Mic, MicOff, PencilLine, Plus, Sparkles, Volume2, X } from 'lucide-react';
-import { LiveAudioManager } from '../audio.ts';
+import { apiFetch, getErrorMessage } from '../api.ts';
+import { useLiveVoiceSession } from '../hooks/useLiveVoiceSession.ts';
 import { LearnerProfile, Persona } from '../types.ts';
+import { ModalDialog } from './ModalDialog.tsx';
 
 interface OnboardingDialogProps {
   dialogRef: React.RefObject<HTMLDialogElement | null>;
@@ -30,7 +32,6 @@ export function OnboardingDialog({
   const [voiceState, setVoiceState] = useState<'connecting' | 'active' | 'done'>('connecting');
   const [statusText, setStatusText] = useState('');
   const [error, setError] = useState('');
-  const [micLevel, setMicLevel] = useState(0);
   const [aiSpeaking, setAiSpeaking] = useState(false);
   const [transcript, setTranscript] = useState<Array<{ speaker: 'user' | 'ai'; text: string }>>([]);
   const [draftUser, setDraftUser] = useState('');
@@ -44,26 +45,12 @@ export function OnboardingDialog({
   const [formSummary, setFormSummary] = useState(profile.summary || '');
   const [isSavingForm, setIsSavingForm] = useState(false);
 
-  const wsRef = useRef<WebSocket | null>(null);
-  const audioRef = useRef<LiveAudioManager | null>(null);
+  const { micMeterRef, startSession, stopSession } = useLiveVoiceSession();
 
   const stopVoiceSession = useCallback(() => {
-    if (wsRef.current) {
-      try {
-        if (wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({ type: 'end_session' }));
-        }
-        wsRef.current.close();
-      } catch {
-        // ignore
-      }
-      wsRef.current = null;
-    }
-    if (audioRef.current) {
-      audioRef.current.stopAll();
-      audioRef.current = null;
-    }
-  }, []);
+    stopSession({ sendEndSession: true });
+    setAiSpeaking(false);
+  }, [stopSession]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -85,9 +72,8 @@ export function OnboardingDialog({
   const handleDismissForLater = async () => {
     stopVoiceSession();
     try {
-      await fetch('/api/profile/onboarding', {
+      await apiFetch('/api/profile/onboarding', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ onboarding_completed: true }),
       });
       await onRefreshBootstrap();
@@ -110,39 +96,13 @@ export function OnboardingDialog({
     setTranscript([]);
     setSavedPeopleInVoice([]);
 
-    try {
-      const audioManager = new LiveAudioManager();
-      audioRef.current = audioManager;
-      audioManager.onVolumeChange = (vol, speaking) => {
-        setMicLevel(vol);
-        setAiSpeaking(speaking);
-      };
-
-      await audioManager.startMicrophone();
-
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(`${protocol}//${window.location.host}/ws/live`);
-      wsRef.current = ws;
-
-      audioManager.onAudioInputChunk = (base64Pcm) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'audio_input', data: base64Pcm }));
-        }
-      };
-
-      ws.onopen = () => {
-        ws.send(JSON.stringify({ type: 'start_onboarding' }));
-      };
-
-      ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
+    await startSession({
+      startPayload: { type: 'start_onboarding' },
+      onAiSpeakingChange: setAiSpeaking,
+      onMessage: (msg) => {
         if (msg.type === 'session_started') {
           setVoiceState('active');
           setStatusText('Verbunden — antworte einfach ganz normal auf Deutsch.');
-        } else if (msg.type === 'audio_chunk') {
-          audioManager.playPcm24kChunk(msg.data);
-        } else if (msg.type === 'interrupted') {
-          audioManager.interruptPlayback();
         } else if (msg.type === 'transcript_delta') {
           if (msg.speaker === 'user') setDraftUser(msg.fullTurnText || '');
           else setDraftAi(msg.fullTurnText || '');
@@ -152,7 +112,7 @@ export function OnboardingDialog({
           setTranscript((prev) => [...prev, { speaker: msg.speaker, text: msg.text }]);
         } else if (msg.type === 'onboarding_profile_updated' && msg.profile) {
           setSavedProfileName(msg.profile.name);
-          onRefreshBootstrap();
+          void onRefreshBootstrap();
         } else if (msg.type === 'onboarding_person_saved' && msg.persona) {
           setSavedPeopleInVoice((prev) => {
             const exists = prev.some((p) => p.id === msg.persona.id);
@@ -160,39 +120,38 @@ export function OnboardingDialog({
               ? prev.map((p) => (p.id === msg.persona.id ? msg.persona : p))
               : [...prev, msg.persona];
           });
-          onRefreshBootstrap();
+          void onRefreshBootstrap();
         } else if (msg.type === 'onboarding_completed') {
           setVoiceState('done');
           setStatusText(msg.summary_de || 'Einrichtung abgeschlossen!');
-          onRefreshBootstrap();
+          void onRefreshBootstrap();
         } else if (msg.type === 'error') {
           setError(msg.message || 'Verbindungsfehler zum Sprachmodell.');
           stopVoiceSession();
         }
-      };
-
-      ws.onerror = () => {
-        setError('WebSocket-Verbindungsfehler zum Server.');
-        stopVoiceSession();
-      };
-    } catch (err: any) {
-      setError(
-        `Mikrofon konnte nicht gestartet werden: ${err?.message || 'Bitte Mikrofonzugriff erlauben.'}`
-      );
-      stopVoiceSession();
-    }
+      },
+      onError: (message) => {
+        setError(`Mikrofon/Verbindung fehlgeschlagen: ${message}`);
+      },
+      onUnexpectedClose: () => {
+        setError('Verbindung zum Einrichtungs-Assistenten unerwartet getrennt.');
+      },
+    });
   };
 
   const handleFinishVoice = async () => {
     stopVoiceSession();
-    await fetch('/api/profile/onboarding', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ onboarding_completed: true }),
-    });
-    await onRefreshBootstrap();
-    dialogRef.current?.close();
-    onClose();
+    try {
+      await apiFetch('/api/profile/onboarding', {
+        method: 'POST',
+        body: JSON.stringify({ onboarding_completed: true }),
+      });
+      await onRefreshBootstrap();
+      dialogRef.current?.close();
+      onClose();
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, 'Einrichtung konnte nicht abgeschlossen werden.'));
+    }
   };
 
   const handleSaveForm = async (e: React.FormEvent) => {
@@ -200,9 +159,8 @@ export function OnboardingDialog({
     setIsSavingForm(true);
     setError('');
     try {
-      const res = await fetch('/api/profile/onboarding', {
+      await apiFetch('/api/profile/onboarding', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: formName.trim() || profile.name,
           level: formLevel,
@@ -210,34 +168,26 @@ export function OnboardingDialog({
           onboarding_completed: true,
         }),
       });
-      if (!res.ok) throw new Error('Profil konnte nicht gespeichert werden.');
       await onRefreshBootstrap();
       dialogRef.current?.close();
       onClose();
-    } catch (err: any) {
-      setError(err?.message || 'Fehler beim Speichern.');
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, 'Fehler beim Speichern.'));
     } finally {
       setIsSavingForm(false);
     }
   };
 
   return (
-    <dialog
-      ref={dialogRef}
-      closedby="any"
-      className="onboarding-dialog"
-      aria-labelledby="onboarding-dialog-title"
-      onCancel={() => {
+    <ModalDialog
+      dialogRef={dialogRef}
+      isOpen={isOpen}
+      onClose={() => {
         stopVoiceSession();
         onClose();
       }}
-      onClick={(e) => {
-        if (e.target === dialogRef.current) {
-          stopVoiceSession();
-          dialogRef.current.close();
-          onClose();
-        }
-      }}
+      className="onboarding-dialog"
+      aria-labelledby="onboarding-dialog-title"
     >
       <div className="dialog-header">
         <div>
@@ -340,8 +290,9 @@ export function OnboardingDialog({
             </div>
             <div className="mic-meter" aria-hidden="true" style={{ width: '100%', height: 6 }}>
               <div
+                ref={micMeterRef}
                 className="mic-meter-fill"
-                style={{ width: `${Math.min(100, Math.round(micLevel * 100))}%` }}
+                style={{ width: '0%' }}
               />
             </div>
           </div>
@@ -473,6 +424,6 @@ export function OnboardingDialog({
           </div>
         </form>
       )}
-    </dialog>
+    </ModalDialog>
   );
 }
