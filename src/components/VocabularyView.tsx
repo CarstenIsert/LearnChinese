@@ -655,14 +655,24 @@ export function VocabularyView({
                 )}
 
                 {!isRevealed ? (
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    style={{ padding: '0.55rem 1.25rem' }}
-                    onClick={() => setIsRevealed(true)}
-                  >
-                    <Eye size={16} aria-hidden="true" /> Antwort aufdecken
-                  </button>
+                  <div className="trainer-rating-row" style={{ marginBlockStart: '0.25rem' }}>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      style={{ padding: '0.55rem 1.25rem' }}
+                      onClick={() => setIsRevealed(true)}
+                    >
+                      <Eye size={16} aria-hidden="true" /> Antwort aufdecken
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      style={{ padding: '0.55rem 1.25rem' }}
+                      onClick={() => handleRateCard('used_actively')}
+                    >
+                      <CheckCircle2 size={16} aria-hidden="true" /> Sicher gewusst
+                    </button>
+                  </div>
                 ) : (
                   <div className="trainer-back">
                     {direction === 'de-to-zh' && (
