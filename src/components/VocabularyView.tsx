@@ -39,7 +39,25 @@ type DeckFilter = 'due' | 'weak_random' | 'struggling' | 'all';
 type CardDirection = 'zh-to-de' | 'de-to-zh';
 
 let activeAudio: HTMLAudioElement | null = null;
+let activeAudioUrl: string | null = null;
+let activeAudioAbort: AbortController | null = null;
 const audioVersionMap = new Map<string, number>();
+
+function stopActiveAudio() {
+  if (activeAudioAbort) {
+    activeAudioAbort.abort();
+    activeAudioAbort = null;
+  }
+  if (activeAudio) {
+    activeAudio.pause();
+    activeAudio.currentTime = 0;
+    activeAudio = null;
+  }
+  if (activeAudioUrl) {
+    URL.revokeObjectURL(activeAudioUrl);
+    activeAudioUrl = null;
+  }
+}
 
 function fisherYatesShuffle<T>(items: T[], seed: number): T[] {
   const copy = [...items];
@@ -78,22 +96,25 @@ function pickWeakRandomWords(words: VocabularyWord[], count: number): Vocabulary
 async function speakMandarin(
   text: string,
   onStateChange?: (loading: boolean) => void,
-  options?: { forceRefresh?: boolean; onRegeneratingChange?: (regenerating: boolean) => void }
+  options?: {
+    forceRefresh?: boolean;
+    onRegeneratingChange?: (regenerating: boolean) => void;
+    onError?: (message: string) => void;
+  }
 ) {
   const cleanText = text.replace(/\(.*?\)|（.*?）/g, '').trim();
   if (!cleanText) return;
 
-  if (activeAudio) {
-    activeAudio.pause();
-    activeAudio.currentTime = 0;
-    activeAudio = null;
-  }
+  stopActiveAudio();
+  options?.onError?.('');
 
   const forceRefresh = Boolean(options?.forceRefresh);
   if (forceRefresh) {
     audioVersionMap.set(cleanText, Date.now());
   }
   const version = audioVersionMap.get(cleanText);
+  const controller = new AbortController();
+  activeAudioAbort = controller;
 
   try {
     onStateChange?.(true);
@@ -102,21 +123,40 @@ async function speakMandarin(
     if (forceRefresh) params.set('refresh', '1');
     if (version) params.set('v', String(version));
     const url = `/api/tts?${params.toString()}`;
-    const audio = new Audio(url);
+
+    const resp = await fetch(url, { signal: controller.signal });
+    if (!resp.ok) {
+      const errJson = await resp.json().catch(() => ({}));
+      throw new Error(errJson.error || `Audio-Fehler (${resp.status})`);
+    }
+    const blob = await resp.blob();
+    if (controller.signal.aborted) return;
+
+    const blobUrl = URL.createObjectURL(blob);
+    activeAudioUrl = blobUrl;
+    const audio = new Audio(blobUrl);
     activeAudio = audio;
-    audio.onended = () => {
+    const cleanup = () => {
       if (activeAudio === audio) activeAudio = null;
-      onStateChange?.(false);
-    };
-    audio.onerror = () => {
-      if (activeAudio === audio) activeAudio = null;
+      if (activeAudioUrl === blobUrl) {
+        URL.revokeObjectURL(blobUrl);
+        activeAudioUrl = null;
+      }
       onStateChange?.(false);
       if (forceRefresh) options?.onRegeneratingChange?.(false);
     };
+    audio.onended = cleanup;
+    audio.onerror = () => {
+      cleanup();
+      options?.onError?.('Audio konnte im Browser nicht abgespielt werden.');
+    };
     await audio.play();
-  } catch {
+  } catch (err: unknown) {
+    if (err instanceof DOMException && err.name === 'AbortError') return;
     onStateChange?.(false);
+    options?.onError?.(getErrorMessage(err, 'Sprachausgabe fehlgeschlagen.'));
   } finally {
+    if (activeAudioAbort === controller) activeAudioAbort = null;
     if (forceRefresh) options?.onRegeneratingChange?.(false);
   }
 }
@@ -138,6 +178,7 @@ export function VocabularyView({
   const [cardIndex, setCardIndex] = useState<number>(0);
   const [isRevealed, setIsRevealed] = useState<boolean>(false);
   const [isAudioPlaying, setIsAudioPlaying] = useState<boolean>(false);
+  const [audioError, setAudioError] = useState<string>('');
   const [regeneratingTarget, setRegeneratingTarget] = useState<'word' | 'example' | null>(null);
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [isCheckingPronunciation, setIsCheckingPronunciation] = useState<boolean>(false);
@@ -169,11 +210,7 @@ export function VocabularyView({
   useEffect(() => {
     return () => {
       stopMediaTracks();
-      if (activeAudio) {
-        activeAudio.pause();
-        activeAudio.currentTime = 0;
-        activeAudio = null;
-      }
+      stopActiveAudio();
     };
   }, []);
 
@@ -215,11 +252,16 @@ export function VocabularyView({
   }, [allVocabulary, deckFilter, dueVocabulary, shuffleSeed, weakRandomIds]);
 
   const currentCard = trainerDeck[cardIndex] || null;
-  const isDeckDone = trainerDeck.length > 0 && cardIndex >= trainerDeck.length;
+  const isDeckDone =
+    (trainerDeck.length > 0 && cardIndex >= trainerDeck.length) ||
+    (trainerDeck.length === 0 && sessionCompleted > 0);
 
   const resetTrainer = (newFilter?: DeckFilter) => {
     if (newFilter) setDeckFilter(newFilter);
     stopMediaTracks();
+    stopActiveAudio();
+    setIsAudioPlaying(false);
+    setAudioError('');
     setIsRecording(false);
     setCardIndex(0);
     setIsRevealed(false);
@@ -232,7 +274,12 @@ export function VocabularyView({
   const handleRateCard = async (outcome: 'used_actively' | 'recognized' | 'forgotten') => {
     if (!currentCard) return;
     stopMediaTracks();
+    stopActiveAudio();
+    setIsAudioPlaying(false);
+    setAudioError('');
     setIsRecording(false);
+    const cardRemovedOrMoved =
+      deckFilter === 'due' || (deckFilter === 'struggling' && outcome !== 'forgotten');
     await onReviewVocabulary(currentCard.simplified_hanzi, outcome);
     setSessionCompleted((c) => c + 1);
     if (outcome === 'used_actively' || outcome === 'recognized') {
@@ -241,7 +288,9 @@ export function VocabularyView({
     setIsRevealed(false);
     setPronunciationResult(null);
     setPronunciationError('');
-    setCardIndex((i) => i + 1);
+    if (!cardRemovedOrMoved) {
+      setCardIndex((i) => i + 1);
+    }
   };
 
   const startVoiceCheck = async () => {
@@ -576,7 +625,11 @@ export function VocabularyView({
                   <button
                     type="button"
                     className="btn-primary btn-listen-hero"
-                    onClick={() => speakMandarin(currentCard.simplified_hanzi, setIsAudioPlaying)}
+                    onClick={() =>
+                      speakMandarin(currentCard.simplified_hanzi, setIsAudioPlaying, {
+                        onError: setAudioError,
+                      })
+                    }
                     title="Mit Gemini-Stimme vorlesen"
                   >
                     <Volume2 size={22} aria-hidden="true" />
@@ -592,6 +645,7 @@ export function VocabularyView({
                         forceRefresh: true,
                         onRegeneratingChange: (loading) =>
                           setRegeneratingTarget(loading ? 'word' : null),
+                        onError: setAudioError,
                       })
                     }
                     title="Audio neu generieren (falls fehlerhaft oder abgeschnitten)"
@@ -624,6 +678,12 @@ export function VocabularyView({
                     </button>
                   )}
                 </div>
+
+                {audioError && (
+                  <div className="error-banner" role="alert" style={{ width: '100%', maxInlineSize: 520, margin: 0 }}>
+                    <span>{audioError}</span>
+                  </div>
+                )}
 
                 {pronunciationError && (
                   <div className="error-banner" role="alert" style={{ width: '100%', maxInlineSize: 520, margin: 0 }}>
@@ -696,7 +756,9 @@ export function VocabularyView({
                             className="btn-back-home"
                             style={{ padding: '0.15rem 0.45rem', fontSize: '0.75rem' }}
                             onClick={() =>
-                              speakMandarin(currentCard.example_hanzi!, setIsAudioPlaying)
+                              speakMandarin(currentCard.example_hanzi!, setIsAudioPlaying, {
+                                onError: setAudioError,
+                              })
                             }
                             title="Beispielsatz vorlesen"
                           >
@@ -712,6 +774,7 @@ export function VocabularyView({
                                 forceRefresh: true,
                                 onRegeneratingChange: (loading) =>
                                   setRegeneratingTarget(loading ? 'example' : null),
+                                onError: setAudioError,
                               })
                             }
                             title="Beispielsatz-Audio neu generieren"

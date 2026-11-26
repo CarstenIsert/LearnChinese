@@ -131,7 +131,7 @@ app.get(
     const memoryFacts = getAllMemoryFacts(userId);
     const recentEpisodes = getRecentFamilyEpisodesAcrossAll(8, userId);
     const skills = getLearnerSkills(userId);
-    const dueVocabulary = getDueVocabulary(25, userId);
+    const dueVocabulary = getDueVocabulary(500, userId);
     const allVocabulary = getAllVocabulary(userId);
     const recentSessions = getRecentSessions(userId, 10);
     const stats = getLearningStats(userId);
@@ -469,7 +469,7 @@ app.post('/api/vocabulary', (req, res) => {
   res.json({
     word: saved,
     allVocabulary: getAllVocabulary(userId),
-    dueVocabulary: getDueVocabulary(25, userId),
+    dueVocabulary: getDueVocabulary(500, userId),
   });
 });
 
@@ -491,7 +491,7 @@ app.post('/api/vocabulary/review', (req, res) => {
   res.json({
     word: updated,
     allVocabulary: getAllVocabulary(userId),
-    dueVocabulary: getDueVocabulary(25, userId),
+    dueVocabulary: getDueVocabulary(500, userId),
   });
 });
 

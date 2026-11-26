@@ -463,16 +463,28 @@ export default function App() {
       outcome: 'used_actively' | 'recognized' | 'forgotten'
     ) => {
       try {
-        await apiFetch('/api/vocabulary/review', {
+        const res = await apiFetch<{
+          word: VocabularyWord | null;
+          allVocabulary: VocabularyWord[];
+          dueVocabulary: VocabularyWord[];
+        }>('/api/vocabulary/review', {
           method: 'POST',
           body: JSON.stringify({ simplified_hanzi: simplifiedHanzi, outcome }),
         });
-        await fetchBootstrap();
+        setData((prev) =>
+          prev
+            ? {
+                ...prev,
+                allVocabulary: res.allVocabulary,
+                dueVocabulary: res.dueVocabulary,
+              }
+            : prev
+        );
       } catch (err: unknown) {
         setErrorMessage(getErrorMessage(err, 'Vokabelbewertung konnte nicht gespeichert werden.'));
       }
     },
-    [fetchBootstrap]
+    []
   );
 
   if (authStatus === 'loading') {
